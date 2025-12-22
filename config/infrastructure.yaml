@@ -90,6 +90,7 @@ Resources:
           Action: ['sts:AssumeRole']
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
 
   EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile

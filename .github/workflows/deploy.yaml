@@ -68,6 +68,10 @@ jobs:
           docker run -d \
             --name ${{ env.CONTAINER_NAME }} \
             --restart unless-stopped \
+            --log-driver=awslogs \
+            --log-opt awslogs-region=${{ env.AWS_REGION }} \
+            --log-opt awslogs-group=/tado/dhw-scheduler \
+            --log-opt awslogs-create-group=true \
             -e TZ="Europe/London" \
             -v /home/ec2-user/tado-config:/app/storage \
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
