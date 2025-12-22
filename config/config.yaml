@@ -18,31 +18,26 @@ schedule:
     time: "06:00"
     temperature: 35
 
-  - name: "Test"
-    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
-    time: "21:30"
-    temperature: 60
-
   # --- DAILY Shower Recharge ---
   - name: "Mon-Thu: Shower Recharge ON"
     days: ["MON", "TUE", "WED", "THU"]
-    time: "07:45"
+    time: "08:00"
     temperature: 50
 
   - name: "Mon-Thu: Shower Recharge OFF"
     days: ["MON", "TUE", "WED", "THU"]
-    time: "08:15"
+    time: "08:30"
     temperature: 35
 
   # --- FRIDAY TO SUNDAY (Weekend/Hybrid) ---
   - name: "Fri-Sun: Shower Recharge ON"
     days: ["FRI", "SAT", "SUN"]
-    time: "08:45"
+    time: "09:00"
     temperature: 50
 
   - name: "Fri-Sun: Shower Recharge OFF"
     days: ["FRI", "SAT", "SUN"]
-    time: "09:15"
+    time: "09:30"
     temperature: 35
 
   # --- DAILY (Evening Top-up) ---
