@@ -18,6 +18,11 @@ schedule:
     time: "06:00"
     temperature: 35
 
+  - name: "Test"
+    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+    time: "21:30"
+    temperature: 60
+
   # --- DAILY Shower Recharge ---
   - name: "Mon-Thu: Shower Recharge ON"
     days: ["MON", "TUE", "WED", "THU"]
