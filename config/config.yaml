@@ -2,17 +2,23 @@ preferences:
   timezone: "Europe/London"
 
 schedule:
-  # --- MONDAY TO THURSDAY (Work Days) ---
+  # --- DAILY Shower Ready ---
   - name: "Pre-load ON"
-    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
-    time: "05:15"
-    temperature: 60
+    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT"]
+    time: "05:00"
+    temperature: 50
+
+  - name: "Legionella Cycle ON"
+    days: ["SUN"]
+    time: "05:00"
+    temperature: 50
 
   - name: "Pre-load OFF"
-    ays: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
     time: "06:00"
     temperature: 35
 
+  # --- DAILY Shower Recharge ---
   - name: "Mon-Thu: Shower Recharge ON"
     days: ["MON", "TUE", "WED", "THU"]
     time: "07:45"
