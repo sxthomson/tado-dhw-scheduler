@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Full Stack EC2 + ECR + OIDC Auth for GitHub Actions
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair for SSH access
+    Type: AWS::EC2::KeyPair::KeyName
+  
+  MyIP:
+    Description: Your Public IP address (e.g., 1.2.3.4/32)
+    Type: String
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+
+  InstanceType:
+    Description: EC2 instance type (x86_64)
+    Type: String
+    Default: t3.nano
+    AllowedValues: [t3.nano, t3.micro]
+
+  GitHubUserName:
+    Description: Your GitHub Username (e.g., 'johndoe')
+    Type: String
+
+  GitHubRepoName:
+    Description: Your GitHub Repository Name (e.g., 'tado-dhw-scheduler')
+    Type: String
+
+Resources:
+  # ==========================================
+  # 1. SECURITY & IDENTITY (OIDC)
+  # ==========================================
+  GithubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: 
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1 # GitHub's Thumbprint
+
+  GithubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "tado-github-deploy-role-${AWS::StackName}"
+      Description: Role assumed by GitHub Actions to push to ECR
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GithubOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Locks this role to ONLY your specific repo
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubUserName}/${GitHubRepoName}:*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+
+  # ==========================================
+  # 2. INFRASTRUCTURE (EC2 + ECR)
+  # ==========================================
+  TadoRepo:
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: !Ref GitHubRepoName # Match repo name for simplicity
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 5 images",
+                "selection": { "tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 5 },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal: { Service: [ec2.amazonaws.com] }
+          Action: ['sts:AssumeRole']
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref EC2InstanceRole]
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH from my IP only
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref MyIP
+
+  TadoServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      SecurityGroupIds: [!Ref InstanceSecurityGroup]
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      ImageId: resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+      Tags:
+        - Key: Name
+          Value: Tado-DHW-Scheduler
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -y
+          dnf install -y docker git
+          systemctl start docker
+          systemctl enable docker
+          usermod -a -G docker ec2-user
+          mkdir -p /home/ec2-user/tado-config
+          chown -R ec2-user:ec2-user /home/ec2-user/tado-config
+
+Outputs:
+  ServerIP:
+    Value: !GetAtt TadoServer.PublicIp
+  ECRRepoUrl:
+    Value: !GetAtt TadoRepo.RepositoryUri
+  GitHubRoleArn:
+    Description: COPY THIS to your GitHub Action YAML (AWS_ROLE_ARN)
+    Value: !GetAtt GithubDeployRole.Arn
