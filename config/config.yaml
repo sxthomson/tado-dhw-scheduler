@@ -11,7 +11,7 @@ schedule:
   - name: "Legionella Cycle ON"
     days: ["SUN"]
     time: "05:00"
-    temperature: 50
+    temperature: 60
 
   - name: "Pre-load OFF"
     days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
@@ -19,25 +19,14 @@ schedule:
     temperature: 35
 
   # --- DAILY Shower Recharge ---
-  - name: "Mon-Thu: Shower Recharge ON"
-    days: ["MON", "TUE", "WED", "THU"]
-    time: "08:00"
+  - name: "Xmas: Shower Recharge ON"
+    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+    time: "10:00"
     temperature: 50
 
-  - name: "Mon-Thu: Shower Recharge OFF"
-    days: ["MON", "TUE", "WED", "THU"]
-    time: "08:30"
-    temperature: 35
-
-  # --- FRIDAY TO SUNDAY (Weekend/Hybrid) ---
-  - name: "Fri-Sun: Shower Recharge ON"
-    days: ["FRI", "SAT", "SUN"]
-    time: "09:00"
-    temperature: 50
-
-  - name: "Fri-Sun: Shower Recharge OFF"
-    days: ["FRI", "SAT", "SUN"]
-    time: "09:30"
+  - name: "Xmas: Shower Recharge OFF"
+    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+    time: "10:30"
     temperature: 35
 
   # --- DAILY (Evening Top-up) ---
