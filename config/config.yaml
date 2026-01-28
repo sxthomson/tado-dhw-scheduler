@@ -4,29 +4,34 @@ preferences:
 schedule:
   # --- DAILY Shower Ready ---
   - name: "Pre-load ON"
-    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT"]
-    time: "05:00"
-    temperature: 50
-
-  - name: "Legionella Cycle ON"
-    days: ["SUN"]
-    time: "05:00"
+    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+    time: "04:45"
     temperature: 60
 
   - name: "Pre-load OFF"
     days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
-    time: "06:00"
+    time: "05:30"
     temperature: 35
 
   # --- DAILY Shower Recharge ---
-  - name: "Xmas: Shower Recharge ON"
-    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
-    time: "10:00"
+  - name: "Shower Recharge ON"
+    days: ["MON", "TUE", "WED", "THU", "FRI"]
+    time: "08:00"
     temperature: 50
 
-  - name: "Xmas: Shower Recharge OFF"
-    days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
-    time: "10:30"
+  - name: "Shower Recharge OFF"
+    days: ["MON", "TUE", "WED", "THU", "FRI"]
+    time: "09:00"
+    temperature: 35
+
+  - name: "Weekend Shower Recharge ON"
+    days: ["SAT", "SUN"]
+    time: "09:00"
+    temperature: 50
+
+  - name: "Weekend Shower Recharge OFF"
+    days: ["SAT", "SUN"]
+    time: "11:00"
     temperature: 35
 
   # --- DAILY (Evening Top-up) ---
@@ -35,7 +40,7 @@ schedule:
     time: "16:00"
     temperature: 50
 
-  - name: "Daily: Evening Top-up OFF (Return to base)"
+  - name: "Daily: Evening Top-up OFF"
     days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
     time: "16:30"
     temperature: 35
