@@ -20,11 +20,9 @@ logger = logging.getLogger(__name__)
 
 # CONFIGURATION
 CONFIG_PATH = Path("/app/config/config.yaml")
-TOKEN_PATH = Path("/app/storage/token_store.json")
 
 # STATE
 # Stores the datetime of the specific schedule event we last successfully applied
-# e.g., datetime(2023, 10, 27, 6, 30)
 last_successful_event_dt = None
 
 def get_ruling_event(schedule_map, now):
@@ -78,11 +76,6 @@ def main_loop_step(client, config_mgr):
         return
 
     # LOGIC: If the target event is newer than our last success, EXECUTE.
-    # This automatically handles:
-    # 1. New time blocks reached.
-    # 2. Retrying missed blocks (because last_success never updated).
-    # 3. Startup (last_success is None).
-    
     if last_successful_event_dt is None or target_dt > last_successful_event_dt:
         logger.info(f"👉 Target Change Detected: {target_temp}°C (Event from {target_dt.strftime('%H:%M')})")
         
@@ -110,15 +103,18 @@ def main_loop_step(client, config_mgr):
 if __name__ == "__main__":
     logger.info("🚀 Tado DHW Scheduler (State Reconciliation Mode) Starting...")
     
-    # Auth
-    auth = TadoAuthenticator(TOKEN_PATH)
-    if not auth.load_tokens():
-        logger.warning("⚠️ No tokens found. Starting interactive login...")
-        try:
-            auth.interactive_login()
-        except Exception as e:
-            logger.critical(f"Login failed: {e}")
-            sys.exit(1)
+    # --- UPDATED AUTH FLOW ---
+    # Initialize using the strict directory paths expected by the persistent volume
+    auth = TadoAuthenticator(token_dir="/app/storage", token_file="token_store.json")
+    
+    try:
+        # This one call replaces load_tokens() and interactive_login().
+        # It handles missing tokens, expired tokens, and the OAuth printout automatically.
+        auth.get_authenticated_session()
+    except Exception as e:
+        logger.critical(f"Login failed: {e}")
+        sys.exit(1)
+    # -------------------------
 
     # Client
     client = TadoClient(auth)
@@ -130,7 +126,6 @@ if __name__ == "__main__":
 
     # Config
     def on_reload():
-        # On reload, we might want to force a re-check, but the loop handles it naturally
         logger.info("Config reloaded.")
         
     config_mgr = ConfigManager(CONFIG_PATH, on_reload)
@@ -144,5 +139,4 @@ if __name__ == "__main__":
             logger.error(f"💥 Unexpected error in main loop: {e}")
             
         # Wait 60 seconds before next check
-        # This acts as our "Retry Interval" for failed calls
         time.sleep(60)
