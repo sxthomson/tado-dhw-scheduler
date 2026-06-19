@@ -26,10 +26,10 @@ class TadoAuthenticator:
     def save_tokens(self, tokens):
         """Saves active tokens to the persistent storage volume."""
         try:
-            with open(self.TOKEN_PATH, "w") as f:
-                json.dump(tokens, f, indent=4)
             # Set absolute timestamp for token expiration tracking
-            tokens["expires_at"] = time.time() + tokens.get("expires_in", 3600)
+            if "expires_at" not in tokens:
+                tokens["expires_at"] = time.time() + tokens.get("expires_in", 3600)
+                
             with open(self.TOKEN_PATH, "w") as f:
                 json.dump(tokens, f, indent=4)
             print("[INFO] Tokens successfully cached to storage.", flush=True)
@@ -157,9 +157,9 @@ class TadoAuthenticator:
                 
                 error = poll_data.get("error", "")
                 if error == "authorization_pending":
-                    continue  # User hasn't finished logging in yet, keep waiting
+                    continue  # Keep waiting for user interaction
                 elif error == "slow_down":
-                    interval += 5  # Server requested a slower polling cadence
+                    interval += 5  # Back off polling speed per server constraints
                 elif error in ["expired_token", "access_denied"]:
                     print(f"\n[ERROR] Authorization session closed: {poll_data.get('error_description')}", flush=True)
                     return None
