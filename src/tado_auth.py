@@ -155,4 +155,18 @@ class TadoAuth:
                     self.save_tokens(poll_data)
                     return poll_data
                 
-                error = poll_data.get
+                error = poll_data.get("error", "")
+                if error == "authorization_pending":
+                    continue  # User hasn't finished logging in yet, keep waiting
+                elif error == "slow_down":
+                    interval += 5  # Server requested a slower polling cadence
+                elif error in ["expired_token", "access_denied"]:
+                    print(f"\n[ERROR] Authorization session closed: {poll_data.get('error_description')}", flush=True)
+                    return None
+                else:
+                    print(f"\n[ERROR] Unexpected polling response: {poll_data}", flush=True)
+                    return None
+                    
+            except requests.RequestException as e:
+                print(f"\n[WARNING] Network hiccup while polling auth status: {e}", flush=True)
+                continue
