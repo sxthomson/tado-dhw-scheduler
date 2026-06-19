@@ -8,8 +8,6 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
   CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
-  # Using a GitHub Variable for the Role ARN (Best Practice)
-  # Ensure you create a configuration variable named AWS_ROLE_ARN in your environment settings
   AWS_ROLE_ARN: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/tado-github-deploy-role
   EC2_TARGET_TAG: ${{ vars.EC2_TARGET_TAG }}
 
@@ -54,15 +52,8 @@ jobs:
     - name: Deploy to EC2 via SSM
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-      run: |
+      run:
         aws ssm send-command \
           --targets "Key=tag:Name,Values=${{ env.EC2_TARGET_TAG }}" \
           --document-name "AWS-RunShellScript" \
-          --parameters commands=[ \
-            "aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}", \
-            "docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest", \
-            "docker stop ${{ env.CONTAINER_NAME }} || true", \
-            "docker rm ${{ env.CONTAINER_NAME }} || true", \
-            "docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped --dns 2a00:1098:2b::1 --log-driver=awslogs --log-opt awslogs-region=${{ env.AWS_REGION }} --log-opt awslogs-group=/tado/dhw-scheduler --log-opt awslogs-create-group=true -e TZ=\"Europe/London\" -v /home/ec2-user/tado-storage:/app/storage -v /home/ec2-user/tado-config:/app/config ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest", \
-            "docker system prune -af" \
-          ]
+          --parameters commands="aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }} ; docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest ; docker stop ${{ env.CONTAINER_NAME }} || true ; docker rm ${{ env.CONTAINER_NAME }} || true ; docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped --dns 2a00:1098:2b::1 --log-driver=awslogs --log-opt awslogs-region=${{ env.AWS_REGION }} --log-opt awslogs-group=/tado/dhw-scheduler --log-opt awslogs-create-group=true -e TZ=Europe/London -v /home/ec2-user/tado-storage:/app/storage -v /home/ec2-user/tado-config:/app/config ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest ; docker system prune -af"
