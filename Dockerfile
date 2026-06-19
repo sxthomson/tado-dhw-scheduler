@@ -16,11 +16,11 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # Copy Source Code
 COPY src/ /app/src/
 
-# Copy the Config File
-COPY config/config.yaml /app/config/config.yaml
+# Copy the Config File to a safe fallback location
+COPY config/config.yaml /app/default_config.yaml
 
-# Create directory for persistent tokens
-RUN mkdir -p /app/storage
+# Ensure the mount directories exist
+RUN mkdir -p /app/storage /app/config
 
 # Set Python Path
 ENV PYTHONPATH=/app/src

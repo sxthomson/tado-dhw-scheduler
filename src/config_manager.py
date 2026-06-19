@@ -1,5 +1,6 @@
 import yaml
 import logging
+import shutil
 from pathlib import Path
 from datetime import datetime
 from watchdog.observers import Observer
@@ -10,15 +11,37 @@ logger = logging.getLogger(__name__)
 class ConfigManager(FileSystemEventHandler):
     def __init__(self, config_path, on_reload_callback):
         self.config_path = Path(config_path)
+        self.default_path = Path("/app/default_config.yaml") # Safe fallback location
         self.callback = on_reload_callback
         self.config = {}
         self.schedule_map = {}
+        
+        # --- THE FIX: Self-Healing Config ---
+        self._ensure_config_exists()
+        # ------------------------------------
         
         self.load_config()
         
         self.observer = Observer()
         self.observer.schedule(self, path=str(self.config_path.parent), recursive=False)
         self.observer.start()
+
+    def _ensure_config_exists(self):
+        """Restores the default config if the Docker bind mount is empty."""
+        if not self.config_path.exists():
+            logger.info(f"⚠️ No config found at {self.config_path}. Restoring default...")
+            try:
+                # Ensure the EC2 host mount directory exists
+                self.config_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Drop the default file into the mounted EC2 directory
+                if self.default_path.exists():
+                    shutil.copy(self.default_path, self.config_path)
+                    logger.info("✅ Default config successfully restored to host directory.")
+                else:
+                    logger.critical(f"💀 Backup config not found at {self.default_path}! Check your Dockerfile.")
+            except Exception as e:
+                logger.error(f"❌ Failed to write default config: {e}")
 
     def load_config(self):
         try:
