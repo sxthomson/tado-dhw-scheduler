@@ -3,7 +3,7 @@ import json
 import time
 import requests
 
-class TadoAuth:
+class TadoAuthenticator:
     def __init__(self, token_dir="/app/storage", token_file="tado_tokens.json"):
         # The public Tado client ID used by their web/mobile apps
         self.CLIENT_ID = "1bb50063-6b0c-4d11-bd99-387f4a91cc46"
