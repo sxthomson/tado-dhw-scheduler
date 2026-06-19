@@ -83,6 +83,26 @@ class TadoAuthenticator:
         
         raise RuntimeError("Authentication pipeline failed completely.")
 
+    def get_valid_token(self):
+        """Bridge method for tado_client.py to retrieve the raw access token string."""
+        tokens = self.load_tokens()
+        
+        # 1. If tokens exist and are valid, return the access token
+        if tokens:
+            expires_at = tokens.get("expires_at", 0)
+            if time.time() < (expires_at - 60):
+                return tokens["access_token"]
+        
+        # 2. If tokens are missing or expired, trigger the main flow to refresh/login
+        self.get_authenticated_session()
+        
+        # 3. Reload and return the fresh token
+        fresh_tokens = self.load_tokens()
+        if fresh_tokens:
+            return fresh_tokens["access_token"]
+            
+        raise RuntimeError("Could not retrieve a valid token for the client.")
+
     def _create_session(self, access_token):
         """Helper to build a pre-authorized requests session."""
         session = requests.Session()
