@@ -32,7 +32,12 @@ class TadoClient:
             except:
                 logger.error(f"⚠️ Raw Response: {resp.text}")
             raise e
-
+            
+    @retry(
+        stop=stop_after_attempt(5), 
+        wait=wait_exponential(multiplier=1, min=2, max=15),
+        retry=retry_if_exception_type((requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+    )
     def discover_context(self):
         logger.info("🔍 Discovering Home ID...")
         resp = self._handle_request("GET", self.ME_URL)
