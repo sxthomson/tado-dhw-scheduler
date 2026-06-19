@@ -12,48 +12,45 @@ env:
   EC2_TARGET_TAG: ${{ vars.EC2_TARGET_TAG }}
 
 permissions:
-  id-token: write   # Required for requesting the OIDC JWT
-  contents: read    # Required for actions/checkout
+  id-token: write   
+  contents: read    
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
-    # --- KEY CHANGE: TARGET THE ENVIRONMENT ---
-    # This loads secrets (EC2_HOST, SSH_KEY) from the 'production' environment
     environment: production  
-    # ------------------------------------------
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v3
+      uses: aws-actions/configure-aws-credentials@v4
       with:
         role-to-assume: ${{ env.AWS_ROLE_ARN }}
         aws-region: ${{ env.AWS_REGION }}
 
     - name: Login to Amazon ECR
       id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
+      uses: aws-actions/amazon-ecr-login@v2
 
+    # --- CRITICAL ADDITION: Required to build for t4g.nano (Graviton) ---
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    # --- CRITICAL ADDITION: Added --platform linux/arm64 flag ---
     - name: Build and Push Image
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker build --platform linux/arm64 -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
         docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-    # --- REPLACED SSH WITH AWS SSM (TAG BASED) ---
     - name: Deploy to EC2 via SSM
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-      run:
-        aws ssm send-command \
-          --targets "Key=tag:Name,Values=${{ env.EC2_TARGET_TAG }}" \
-          --document-name "AWS-RunShellScript" \
-          --parameters commands="aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }} ; docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest ; docker stop ${{ env.CONTAINER_NAME }} || true ; docker rm ${{ env.CONTAINER_NAME }} || true ; docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped --dns 2a00:1098:2b::1 --log-driver=awslogs --log-opt awslogs-region=${{ env.AWS_REGION }} --log-opt awslogs-group=/tado/dhw-scheduler --log-opt awslogs-create-group=true -e TZ=Europe/London -v /home/ec2-user/tado-storage:/app/storage -v /home/ec2-user/tado-config:/app/config ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest ; docker system prune -af"
+      run: |
+        aws ssm send-command --targets "Key=tag:Name,Values=${{ env.EC2_TARGET_TAG }}" --document-name "AWS-RunShellScript" --parameters commands="aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }} ; docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest ; docker stop ${{ env.CONTAINER_NAME }} || true ; docker rm ${{ env.CONTAINER_NAME }} || true ; docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped --dns 2a00:1098:2b::1 --log-driver=awslogs --log-opt awslogs-region=${{ env.AWS_REGION }} --log-opt awslogs-group=/tado/dhw-scheduler --log-opt awslogs-create-group=true -e TZ=Europe/London -v /home/ec2-user/tado-storage:/app/storage -v /home/ec2-user/tado-config:/app/config ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest ; docker system prune -af"

@@ -2,17 +2,21 @@ FROM python:3.11-alpine
 
 WORKDIR /app
 
-# Install Timezone Data (Crucial for UK DST)
-RUN apk add --no-cache tzdata
+# Install Timezone Data and temporary Build Dependencies
+# We add build-base (C compiler) and yaml-dev to compile PyYAML on ARM64
+RUN apk add --no-cache tzdata \
+    && apk add --no-cache --virtual .build-deps gcc musl-dev yaml-dev build-base
 
-# Install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# Install dependencies, then immediately delete the C compiler to save space
+RUN pip install --no-cache-dir -r requirements.txt \
+    && apk del .build-deps
 
 # Copy Source Code
 COPY src/ /app/src/
 
-# Copy the Config File (Baked into image)
+# Copy the Config File
 COPY config/config.yaml /app/config/config.yaml
 
 # Create directory for persistent tokens
