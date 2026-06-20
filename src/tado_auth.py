@@ -9,6 +9,7 @@ class TadoAuthenticator:
         self.CLIENT_ID = "1bb50063-6b0c-4d11-bd99-387f4a91cc46"
         self.TOKEN_PATH = os.path.join(token_dir, token_file)
         self.AUTH_SERVER = "https://login.tado.com"
+        self.SCOPE = "openid email profile offline_access"
         
         # Ensure persistent storage directory exists
         os.makedirs(token_dir, exist_ok=True)
@@ -47,6 +48,12 @@ class TadoAuthenticator:
             resp = requests.post(f"{self.AUTH_SERVER}/oauth2/token", data=payload, timeout=10)
             if resp.status_code == 200:
                 tokens = resp.json()
+                
+                # --- CRITICAL FIX: Preserve the refresh token if Tado doesn't send a new one ---
+                if "refresh_token" not in tokens:
+                    tokens["refresh_token"] = refresh_token
+                # -----------------------------------------------------------------------------
+                
                 self.save_tokens(tokens)
                 return tokens
             else:
@@ -116,7 +123,7 @@ class TadoAuthenticator:
         """Handles the multi-step interactive OAuth device authentication process."""
         payload = {
             "client_id": self.CLIENT_ID,
-            "scope": "openid email profile"
+            "scope": self.SCOPE
         }
         
         try:
