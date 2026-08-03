@@ -1,7 +1,3 @@
-Here is the complete, consolidated `README.md` for your repository. It reflects the finalized architecture, including the IPv6-only Graviton instance, dynamic SSM tagging, and the headless Tado authentication flow.
-
----
-
 # Tado DHW Scheduler (AWS / Graviton / IPv6)
 
 A programmatic background worker designed to strictly manage the Domestic Hot Water (DHW) schedule for Tado X, ensuring consistent hot water priority for 4-pipe system boilers (like the Viessmann Vitodens 100-W).
