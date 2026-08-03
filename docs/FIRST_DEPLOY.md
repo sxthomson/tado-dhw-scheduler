@@ -249,13 +249,31 @@ Every scheduled run afterwards is autonomous via the stored refresh token.
 
 ## 7. Verify
 
+Verifying (invoking the function, reading its logs) is an **operational** task,
+so use an **admin** identity or the AWS console — the scoped `tado-personal`
+bootstrap user from step 1 deliberately has **no** `lambda:InvokeFunction` or
+`logs:*` permissions.
+
+**Fastest — invoke once with an admin CLI profile:**
+
 ```bash
-aws logs tail /aws/lambda/tado-dhw-scheduler --follow --region "$REGION"
+aws lambda invoke --function-name tado-dhw-scheduler --region "$REGION" \
+  --profile <your-admin-profile> /tmp/tado-out.json && cat /tmp/tado-out.json; echo
 ```
 
-A healthy run logs either `no-op` (already at the target setpoint) or `applied`
-(pushed a change). If it logs "No Tado token found … run bootstrap_auth.py", go
-back to step 6.
+**Or the console** (signed in as admin): Lambda → `tado-dhw-scheduler` → **Test**
+(event `{}`), or **Monitor → View CloudWatch logs**.
+
+**Or just wait** up to 5 minutes for the scheduled run, then read the logs:
+
+```bash
+aws logs tail /aws/lambda/tado-dhw-scheduler --follow --region "$REGION" \
+  --profile <your-admin-profile>
+```
+
+A healthy result is `{"status": "no-op"}` (already at the target setpoint) or
+`{"status": "applied", ...}` (pushed a change). If it errors with "No Tado token
+found … run bootstrap_auth.py", go back to step 6.
 
 ---
 

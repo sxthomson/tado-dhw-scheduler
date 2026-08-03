@@ -3,6 +3,13 @@ name: Deploy Tado DHW Scheduler
 on:
   push:
     branches: [ "main" ]
+    # Docs-only changes don't affect the deployed stack, so skip the deploy.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.claude/**'
+      - '.gitignore'
+      - 'LICENSE'
   workflow_dispatch: {}
 
 permissions:

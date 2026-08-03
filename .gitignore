@@ -210,3 +210,6 @@ __marimo__/
 # SECRETS
 config/token_store.json
 token-store.json
+
+# Claude Code session files
+.claude/
