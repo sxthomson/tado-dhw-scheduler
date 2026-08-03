@@ -10,7 +10,7 @@ A serverless worker that enforces a Domestic Hot Water (DHW) schedule on a Tado 
 
 ## Commands
 
-There is no test suite or linter configured. Development/deploy is via the AWS SAM CLI.
+There is no test suite or linter configured. Development/deploy is via the AWS SAM CLI. The full one-time setup/cutover procedure lives in `docs/FIRST_DEPLOY.md`.
 
 ```bash
 # Validate / build (requires Docker; --use-container builds native wheels for arm64)

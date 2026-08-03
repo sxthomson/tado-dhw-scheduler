@@ -46,111 +46,30 @@ throttle-avoidance (only writes on divergence).
 | `iac/bootstrap-user-policy.json` | Least-privilege policy for the local operator who runs the one-time bootstrap |
 | `.github/workflows/deploy.yml` | CI: build + deploy the SAM stack on push to `main` |
 | `config/config.yaml` | Reference copy of the schedule (seeds the SSM param) |
+| `docs/FIRST_DEPLOY.md` | Step-by-step first-deploy / cutover runbook |
 
 ## First-time setup
 
-> **All AWS steps below use a _personal_ AWS account — never a corporate/work
-> account.** Before every AWS command, run `aws sts get-caller-identity` and
-> confirm the `Account` is your personal account.
+The full, step-by-step first deploy (and cutover from the old EC2 version) is in
+**[`docs/FIRST_DEPLOY.md`](docs/FIRST_DEPLOY.md)** — it covers creating a
+least-privilege bootstrap identity, the deploy role, GitHub variables, deploying
+the app, seeding the OAuth token, verification, and cleanup.
 
-### 0. Create the bootstrap operator credentials (once)
+> **All AWS steps use a _personal_ AWS account — never a corporate/work account.**
+> Before every AWS command, run `aws sts get-caller-identity` and confirm the
+> `Account` is your personal account.
 
-CI uses short-lived OIDC credentials and needs no keys. But the *one-time*
-steps you run by hand (step 1 below, and seeding the token in step 4) need
-local AWS credentials. Rather than root keys or a broad admin user, create a
-dedicated IAM user scoped to exactly those actions using
-`iac/bootstrap-user-policy.json`.
+At a glance:
 
-**Preferred: IAM Identity Center (SSO)** — no long-lived keys on your machine:
-
-```bash
-aws configure sso --profile tado-personal
-aws sso login --profile tado-personal
-export AWS_PROFILE=tado-personal
-```
-Attach the policy below to the permission set / user you log in as.
-
-**Alternative: a dedicated IAM user** (console — *IAM → Users → Create user*):
-
-1. Create a user, e.g. `tado-bootstrap`. Do **not** give it console access unless you want it.
-2. **Enable MFA** on the user (*Security credentials → Assign MFA device*).
-3. Attach an inline policy from `iac/bootstrap-user-policy.json`, first replacing
-   `<ACCOUNT_ID>` and `<REGION>` with your personal account id and region.
-   Via CLI (run by an existing admin, or from the console's JSON editor):
-   ```bash
-   ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-   REGION=eu-west-2
-   sed "s/<ACCOUNT_ID>/$ACCOUNT_ID/g; s/<REGION>/$REGION/g" \
-     iac/bootstrap-user-policy.json > /tmp/tado-bootstrap-policy.json
-   aws iam put-user-policy --user-name tado-bootstrap \
-     --policy-name tado-bootstrap --policy-document file:///tmp/tado-bootstrap-policy.json
-   ```
-4. Create access keys (*Security credentials → Create access key → CLI*) and
-   store them in a named profile:
-   ```bash
-   aws configure --profile tado-personal   # paste the key id / secret / region
-   export AWS_PROFILE=tado-personal
-   ```
-5. **After the bootstrap is complete** (through step 4), delete these access keys
-   — ongoing deploys run via CI/OIDC and don't need them. Keep the user (with no
-   active keys) so re-runs are easy: create a fresh key, run, delete again.
-
-What the policy allows, and nothing more: deploy/update/delete only the
-`tado-dhw-deploy-role` CloudFormation stack; manage only the
-`tado-github-deploy-role` IAM role and the GitHub OIDC provider; and
-`PutParameter` only on `/tado/token` (plus the KMS encrypt needed for a
-SecureString, scoped to SSM).
-
-### 1. Create the GitHub Actions deploy role (once, from your laptop)
-
-Uses the bootstrap credentials from step 0.
-
-```bash
-aws cloudformation deploy \
-  --template-file iac/deploy-role.yaml \
-  --stack-name tado-dhw-deploy-role \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides GitHubOrg=<your-gh-username> GitHubRepo=tado-dhw-scheduler
-```
-
-If your account already has a GitHub OIDC provider (e.g. from the old EC2
-stack), add `ExistingOidcProviderArn=arn:aws:iam::<acct>:oidc-provider/token.actions.githubusercontent.com`
-to `--parameter-overrides` so it reuses the existing one.
-
-Grab the role ARN from the stack outputs:
-
-```bash
-aws cloudformation describe-stacks --stack-name tado-dhw-deploy-role \
-  --query "Stacks[0].Outputs[?OutputKey=='DeployRoleArn'].OutputValue" --output text
-```
-
-### 2. Configure GitHub
-
-In the repo: **Settings → Environments → `production`**, add **variables**:
-
-| Variable | Value |
-|----------|-------|
-| `AWS_DEPLOY_ROLE_ARN` | the role ARN from step 1 |
-| `AWS_REGION` | e.g. `eu-west-2` |
-
-### 3. Deploy the app
-
-Push to `main` (or run the `Deploy Tado DHW Scheduler` workflow manually). This
-creates the Lambda, the 5-minute schedule, and the `/tado/config` parameter.
-
-### 4. Seed the OAuth token (once, from your laptop)
-
-The Tado Device Flow needs a human to approve access in a browser, so it can't
-run in Lambda. Run it locally — it writes the token into SSM where the Lambda
-reads it:
-
-```bash
-pip install boto3 requests
-python scripts/bootstrap_auth.py --region eu-west-2
-```
-
-Open the printed URL, approve, done. Every scheduled run afterwards is
-autonomous via the stored refresh token.
+1. **Bootstrap identity** — create an IAM user (or SSO login) scoped by
+   `iac/bootstrap-user-policy.json`.
+2. **Deploy role** — `aws cloudformation deploy … iac/deploy-role.yaml`.
+3. **GitHub vars** — set `AWS_DEPLOY_ROLE_ARN` + `AWS_REGION` in the `production`
+   environment.
+4. **Deploy the app** — push to `main`; CI builds and deploys the SAM stack.
+5. **Seed the token** — `python scripts/bootstrap_auth.py --region <region>`
+   (one-time browser approval).
+6. **Verify**, then tear down the old EC2 stack.
 
 ## Operations
 
@@ -172,7 +91,9 @@ whether it was a no-op or applied a change.
 ## Migrating from the old EC2 architecture
 
 This project previously ran a 24/7 container on an EC2 `t4g.nano` instance. Once
-the serverless stack is deployed and authenticated (steps above), delete the old
-CloudFormation stack in the AWS console to stop the EC2 charges. That old stack
-also owned the previous OIDC provider and deploy role — see step 1 for handling
-the OIDC provider so the two don't collide.
+the serverless stack is deployed and authenticated, delete the old CloudFormation
+stack in the AWS console to stop the EC2 charges. That old stack also owned the
+previous OIDC provider and deploy role, so deleting it removes them — the
+deploy-role template's `ExistingOidcProviderArn` parameter handles the collision
+if you deploy the new role before deleting the old stack. Full sequence and
+caveats are in [`docs/FIRST_DEPLOY.md`](docs/FIRST_DEPLOY.md).
