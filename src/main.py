@@ -1,142 +1,105 @@
 import time
 import logging
-import sys
-import pytz
 from datetime import datetime, timedelta
-from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from tado_auth import TadoAuthenticator
 from tado_client import TadoClient
 from config_manager import ConfigManager
 
-# --- LOGGING ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(module)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
-# CONFIGURATION
-CONFIG_PATH = Path("/app/config/config.yaml")
+# Reused across warm Lambda invocations to avoid re-discovering the home id
+# and re-creating boto3 clients on every 5-minute tick.
+_client = None
+_config_mgr = None
 
-# STATE
-# Stores the datetime of the specific schedule event we last successfully applied
-last_successful_event_dt = None
 
 def get_ruling_event(schedule_map, now):
+    """Return (event_datetime, temperature) that should be active at `now`.
+
+    Returns (None, None) if the schedule is empty. Looks back to yesterday's
+    last event to cover early-morning hours before any of today's events.
     """
-    Determines which schedule event should be active right now.
-    Returns: (event_datetime, temperature) or (None, None)
-    """
-    # 1. Check Today's Schedule
-    day_str = now.strftime("%a").upper() # "MON"
+    day_str = now.strftime("%a").upper()  # "MON"
     today_events = schedule_map.get(day_str, [])
-    
-    # Filter for events that have already passed today
-    past_events = [e for e in today_events if e['time'] <= now.time()]
-    
+    past_events = [e for e in today_events if e["time"] <= now.time()]
     if past_events:
-        # The latest passed event is the ruling one
-        target = past_events[-1]
-        # Combine with today's date to make a full datetime
-        target_dt = datetime.combine(now.date(), target['time']).replace(tzinfo=now.tzinfo)
-        return target_dt, target['temp']
-    
-    # 2. If no events yet today (e.g. 02:00 AM), check Yesterday's last event
+        target = past_events[-1]  # latest event that has already passed today
+        target_dt = datetime.combine(now.date(), target["time"]).replace(tzinfo=now.tzinfo)
+        return target_dt, target["temp"]
+
+    # Before today's first event -> yesterday's last event still rules.
     yesterday = now - timedelta(days=1)
-    day_str_prev = yesterday.strftime("%a").upper()
-    yesterday_events = schedule_map.get(day_str_prev, [])
-    
-    if yesterday_events:
-        target = yesterday_events[-1]
-        target_dt = datetime.combine(yesterday.date(), target['time']).replace(tzinfo=now.tzinfo)
-        return target_dt, target['temp']
+    prev_events = schedule_map.get(yesterday.strftime("%a").upper(), [])
+    if prev_events:
+        target = prev_events[-1]
+        target_dt = datetime.combine(yesterday.date(), target["time"]).replace(tzinfo=now.tzinfo)
+        return target_dt, target["temp"]
 
     return None, None
 
-def main_loop_step(client, config_mgr):
-    global last_successful_event_dt
-    
-    # Get configuration and timezone
-    tz_name = config_mgr.config.get('preferences', {}).get('timezone', 'Europe/London')
-    try:
-        tz = pytz.timezone(tz_name)
-    except:
-        tz = pytz.UTC
-        
-    now = datetime.now(tz)
-    
-    # Determine what SHOULD be happening
-    target_dt, target_temp = get_ruling_event(config_mgr.schedule_map, now)
-    
-    if not target_dt:
-        logger.debug("No active schedule found (Sparse schedule?).")
-        return
 
-    # LOGIC: If the target event is newer than our last success, EXECUTE.
-    if last_successful_event_dt is None or target_dt > last_successful_event_dt:
-        logger.info(f"👉 Target Change Detected: {target_temp}°C (Event from {target_dt.strftime('%H:%M')})")
-        
-        try:
-            # Attempt to set
-            client.set_dhw_temperature(target_temp)
-            
-            # Verify
-            time.sleep(2)
-            state = client.get_dhw_state()
-            current = state.get('setpoint')
-            
-            if current is None or abs(current - target_temp) > 0.5:
-                 raise Exception(f"Mismatch! Wanted {target_temp}, got {current}")
-            
-            logger.info(f"✅ SUCCESS: Applied {target_temp}°C")
-            
-            # Update State: We successfully applied this specific event instance
-            last_successful_event_dt = target_dt
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to apply target ({e}). Will retry next loop.")
-            # We do NOT update last_successful_event_dt, so the next loop will retry.
-
-if __name__ == "__main__":
-    logger.info("🚀 Tado DHW Scheduler (State Reconciliation Mode) Starting...")
-    
-    # --- UPDATED AUTH FLOW ---
-    # Initialize using the strict directory paths expected by the persistent volume
-    auth = TadoAuthenticator(token_dir="/app/storage", token_file="token_store.json")
-    
-    try:
-        # This one call replaces load_tokens() and interactive_login().
-        # It handles missing tokens, expired tokens, and the OAuth printout automatically.
-        auth.get_authenticated_session()
-    except Exception as e:
-        logger.critical(f"Login failed: {e}")
-        sys.exit(1)
-    # -------------------------
-
-    # Client
-    client = TadoClient(auth)
-    try:
+def _bootstrap():
+    """Lazily build (and cache across warm invocations) the client and config manager."""
+    global _client, _config_mgr
+    if _client is None:
+        auth = TadoAuthenticator()
+        client = TadoClient(auth)
         client.discover_context()
-    except Exception as e:
-        logger.critical(f"💀 Fatal startup error: {e}")
-        sys.exit(1)
+        _client = client
+    if _config_mgr is None:
+        _config_mgr = ConfigManager()
+    return _client, _config_mgr
 
-    # Config
-    def on_reload():
-        logger.info("Config reloaded.")
-        
-    config_mgr = ConfigManager(CONFIG_PATH, on_reload)
 
-    logger.info("⏳ Loop Started. Checking state every 60 seconds...")
-    
-    while True:
-        try:
-            main_loop_step(client, config_mgr)
-        except Exception as e:
-            logger.error(f"💥 Unexpected error in main loop: {e}")
-            
-        # Wait 60 seconds before next check
-        time.sleep(60)
+def reconcile(client, config_mgr):
+    """One idempotent reconciliation pass.
+
+    Unlike the old 24/7 loop, this keeps NO cross-invocation state. Each run it
+    computes the ruling target, reads the current setpoint, and only writes when
+    they diverge (>0.5 C). That naturally avoids spamming the Tado API and also
+    corrects any manual/external override on the next cycle.
+    """
+    config_mgr.load_config()
+
+    tz_name = config_mgr.config.get("preferences", {}).get("timezone", "Europe/London")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    now = datetime.now(tz)
+
+    target_dt, target_temp = get_ruling_event(config_mgr.schedule_map, now)
+    if target_dt is None:
+        logger.info("No active schedule event found. Nothing to do.")
+        return {"status": "no-op", "reason": "no ruling event"}
+
+    state = client.get_dhw_state()
+    current = state.get("setpoint")
+
+    if current is not None and abs(current - target_temp) <= 0.5:
+        logger.info("Already at target %s C (current %s C). No change.", target_temp, current)
+        return {"status": "no-op", "target": target_temp, "current": current}
+
+    logger.info("Divergence detected: target %s C, current %s C. Applying...", target_temp, current)
+    client.set_dhw_temperature(target_temp)
+
+    # Verify the change actually landed.
+    time.sleep(2)
+    verify = client.get_dhw_state().get("setpoint")
+    if verify is None or abs(verify - target_temp) > 0.5:
+        raise RuntimeError(f"Verification failed: wanted {target_temp}, got {verify}")
+
+    logger.info("Applied %s C successfully.", target_temp)
+    return {"status": "applied", "target": target_temp, "previous": current}
+
+
+def handler(event, context):
+    """Lambda entry point. Invoked on a schedule by EventBridge Scheduler."""
+    logger.info("Tado DHW reconcile invocation start.")
+    client, config_mgr = _bootstrap()
+    result = reconcile(client, config_mgr)
+    logger.info("Reconcile result: %s", result)
+    return result

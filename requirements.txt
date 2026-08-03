@@ -1,6 +1,4 @@
 requests>=2.31.0
-schedule>=1.2.0
-watchdog>=3.0.0
-tenacity>=8.2.3
 pyyaml>=6.0
-pytz>=2023.3
+tenacity>=8.2.3
+tzdata>=2023.3

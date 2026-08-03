@@ -1,199 +1,98 @@
 import os
 import json
 import time
+import logging
+
 import requests
+import boto3
+
+logger = logging.getLogger(__name__)
+
+# The public Tado client ID used by their web/mobile apps.
+CLIENT_ID = "1bb50063-6b0c-4d11-bd99-387f4a91cc46"
+AUTH_SERVER = "https://login.tado.com"
+
 
 class TadoAuthenticator:
-    def __init__(self, token_dir="/app/storage", token_file="tado_tokens.json"):
-        # The public Tado client ID used by their web/mobile apps
-        self.CLIENT_ID = "1bb50063-6b0c-4d11-bd99-387f4a91cc46"
-        self.TOKEN_PATH = os.path.join(token_dir, token_file)
-        self.AUTH_SERVER = "https://login.tado.com"
-        self.SCOPE = "openid email profile offline_access"
-        
-        # Ensure persistent storage directory exists
-        os.makedirs(token_dir, exist_ok=True)
+    """Manages Tado OAuth tokens backed by an SSM SecureString parameter.
 
+    In the serverless runtime this class NEVER runs the interactive device
+    flow. If no token exists (or a refresh fails) it raises a clear error and
+    you must run scripts/bootstrap_auth.py once to seed the token. The device
+    flow itself lives in that bootstrap script, not here.
+    """
+
+    def __init__(self, token_param_name=None, ssm_client=None):
+        self.token_param_name = token_param_name or os.environ.get("TOKEN_PARAM_NAME", "/tado/token")
+        self.ssm = ssm_client or boto3.client("ssm")
+
+    # --- storage backed by SSM SecureString ------------------------------
     def load_tokens(self):
-        """Loads cached tokens from the persistent storage volume."""
-        if os.path.exists(self.TOKEN_PATH):
-            try:
-                with open(self.TOKEN_PATH, "r") as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError):
-                print("[WARNING] Token file corrupted or unreadable. Forcing re-authentication.", flush=True)
-        return None
+        try:
+            resp = self.ssm.get_parameter(Name=self.token_param_name, WithDecryption=True)
+            return json.loads(resp["Parameter"]["Value"])
+        except self.ssm.exceptions.ParameterNotFound:
+            return None
+        except (json.JSONDecodeError, KeyError):
+            logger.warning("Token parameter %s present but unreadable/corrupt.", self.token_param_name)
+            return None
 
     def save_tokens(self, tokens):
-        """Saves active tokens to the persistent storage volume."""
-        try:
-            # Set absolute timestamp for token expiration tracking
-            if "expires_at" not in tokens:
-                tokens["expires_at"] = time.time() + tokens.get("expires_in", 3600)
-                
-            with open(self.TOKEN_PATH, "w") as f:
-                json.dump(tokens, f, indent=4)
-            print("[INFO] Tokens successfully cached to storage.", flush=True)
-        except IOError as e:
-            print(f"[ERROR] Failed to save tokens to disk: {e}", flush=True)
+        # Stamp an absolute expiry so we can check validity without another API call.
+        if "expires_at" not in tokens:
+            tokens["expires_at"] = time.time() + tokens.get("expires_in", 3600)
+        self.ssm.put_parameter(
+            Name=self.token_param_name,
+            Value=json.dumps(tokens),
+            Type="SecureString",
+            Overwrite=True,
+        )
+        logger.info("Tokens persisted to SSM parameter %s", self.token_param_name)
 
+    # --- refresh ----------------------------------------------------------
     def refresh_access_token(self, refresh_token):
-        """Uses a refresh token to obtain a new access token without re-authenticating."""
         payload = {
-            "client_id": self.CLIENT_ID,
+            "client_id": CLIENT_ID,
             "grant_type": "refresh_token",
-            "refresh_token": refresh_token
+            "refresh_token": refresh_token,
         }
-        try:
-            resp = requests.post(f"{self.AUTH_SERVER}/oauth2/token", data=payload, timeout=10)
-            if resp.status_code == 200:
-                tokens = resp.json()
-                
-                # --- CRITICAL FIX: Preserve the refresh token if Tado doesn't send a new one ---
-                if "refresh_token" not in tokens:
-                    tokens["refresh_token"] = refresh_token
-                # -----------------------------------------------------------------------------
-                
-                self.save_tokens(tokens)
-                return tokens
-            else:
-                print(f"[ERROR] Token refresh failed: {resp.status_code} - {resp.text}", flush=True)
-                return None
-        except requests.RequestException as e:
-            print(f"[ERROR] Network error during token refresh: {e}", flush=True)
+        resp = requests.post(f"{AUTH_SERVER}/oauth2/token", data=payload, timeout=10)
+        if resp.status_code != 200:
+            logger.error("Token refresh failed: %s - %s", resp.status_code, resp.text)
             return None
 
-    def get_authenticated_session(self):
-        """
-        Main entry point for handling auth state. Returns an authenticated HTTP session 
-        or executes the interactive OAuth Device Flow if no valid tokens exist.
-        """
-        tokens = self.load_tokens()
+        tokens = resp.json()
+        # Preserve the refresh token if Tado doesn't rotate it (prevents token loss).
+        if "refresh_token" not in tokens:
+            tokens["refresh_token"] = refresh_token
+        self.save_tokens(tokens)
+        return tokens
 
-        if tokens:
-            # Check if the current token is still valid or needs a refresh
-            expires_at = tokens.get("expires_at", 0)
-            if time.time() < (expires_at - 60):  # 1-minute buffer
-                return self._create_session(tokens["access_token"])
-            
-            print("[INFO] Access token expired. Attempting refresh...", flush=True)
-            if "refresh_token" in tokens:
-                new_tokens = self.refresh_access_token(tokens["refresh_token"])
-                if new_tokens:
-                    return self._create_session(new_tokens["access_token"])
-
-        # Fall back to interactive Device Flow login if loading and refreshing fail
-        print("[WARNING] No active authorization available. Launching Device Flow...", flush=True)
-        tokens = self._run_device_flow()
-        if tokens:
-            return self._create_session(tokens["access_token"])
-        
-        raise RuntimeError("Authentication pipeline failed completely.")
-
+    # --- public API used by TadoClient ------------------------------------
     def get_valid_token(self):
-        """Bridge method for tado_client.py to retrieve the raw access token string."""
+        """Return a currently-valid access token, refreshing if needed."""
         tokens = self.load_tokens()
-        
-        # 1. If tokens exist and are valid, return the access token
-        if tokens:
-            expires_at = tokens.get("expires_at", 0)
-            if time.time() < (expires_at - 60):
-                return tokens["access_token"]
-        
-        # 2. If tokens are missing or expired, trigger the main flow to refresh/login
-        self.get_authenticated_session()
-        
-        # 3. Reload and return the fresh token
-        fresh_tokens = self.load_tokens()
-        if fresh_tokens:
-            return fresh_tokens["access_token"]
-            
-        raise RuntimeError("Could not retrieve a valid token for the client.")
+        if not tokens:
+            raise RuntimeError(
+                f"No Tado token found in SSM ({self.token_param_name}). "
+                "Run scripts/bootstrap_auth.py once to seed it."
+            )
 
-    def _create_session(self, access_token):
-        """Helper to build a pre-authorized requests session."""
-        session = requests.Session()
-        session.headers.update({
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
-        })
-        return session
+        # Still valid? (60s safety buffer)
+        if time.time() < (tokens.get("expires_at", 0) - 60):
+            return tokens["access_token"]
 
-    def _run_device_flow(self):
-        """Handles the multi-step interactive OAuth device authentication process."""
-        payload = {
-            "client_id": self.CLIENT_ID,
-            "scope": self.SCOPE
-        }
-        
-        try:
-            resp = requests.post(f"{self.AUTH_SERVER}/oauth2/device_authorize", data=payload, timeout=10)
-            data = resp.json()
-        except requests.RequestException as e:
-            print(f"[CRITICAL] Failed to connect to Tado Auth backend: {e}", flush=True)
-            time.sleep(60)
-            return None
+        logger.info("Access token expired; refreshing.")
+        refresh_token = tokens.get("refresh_token")
+        if not refresh_token:
+            raise RuntimeError(
+                "Access token expired and no refresh_token stored. "
+                "Re-run scripts/bootstrap_auth.py."
+            )
 
-        # --- 1. CATCH TADO API ERRORS & RATE LIMITS ---
-        if 'error' in data:
-            print(f"\n🚨 TADO API ERROR: {data.get('error')} - {data.get('error_description', 'No details available')}", flush=True)
-            print("⏳ Cool-down active. Script will sleep for 5 minutes to prevent spamming...", flush=True)
-            time.sleep(300)
-            return None
-
-        # --- 2. EXTRACT DEVICE CODES AND LINKS SAFELY ---
-        device_code = data.get('device_code')
-        user_code = data.get('user_code')
-        interval = data.get('interval', 5)
-        auth_url = data.get('verification_uri_complete', '')
-
-        # --- 3. FIX MISSING CLIENT_ID DESYNC ---
-        if auth_url:
-            if "client_id=" not in auth_url:
-                auth_url += f"&client_id={self.CLIENT_ID}"
-
-            print("\n============================================================", flush=True)
-            print("🔐 TADO AUTHENTICATION REQUIRED", flush=True)
-            print("============================================================", flush=True)
-            print(f"👉 STEP 1: Visit this authorization URL in your browser:\n", flush=True)
-            print(f"   {auth_url}\n", flush=True)
-            print(f"👉 STEP 2: Verify the displayed code matches: {user_code}\n", flush=True)
-            print("============================================================\n", flush=True)
-        else:
-            print(f"[CRITICAL] Tado response format unexpected. Raw payload: {data}", flush=True)
-            return None
-
-        # --- 4. POLL FOR USER APPROVAL ---
-        poll_payload = {
-            "client_id": self.CLIENT_ID,
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            "device_code": device_code
-        }
-
-        print("[INFO] Waiting for authorization...", flush=True)
-        while True:
-            time.sleep(interval)
-            try:
-                poll_resp = requests.post(f"{self.AUTH_SERVER}/oauth2/token", data=poll_payload, timeout=10)
-                poll_data = poll_resp.json()
-                
-                if poll_resp.status_code == 200:
-                    print("\n🎉 Access granted successfully!", flush=True)
-                    self.save_tokens(poll_data)
-                    return poll_data
-                
-                error = poll_data.get("error", "")
-                if error == "authorization_pending":
-                    continue  # Keep waiting for user interaction
-                elif error == "slow_down":
-                    interval += 5  # Back off polling speed per server constraints
-                elif error in ["expired_token", "access_denied"]:
-                    print(f"\n[ERROR] Authorization session closed: {poll_data.get('error_description')}", flush=True)
-                    return None
-                else:
-                    print(f"\n[ERROR] Unexpected polling response: {poll_data}", flush=True)
-                    return None
-                    
-            except requests.RequestException as e:
-                print(f"\n[WARNING] Network hiccup while polling auth status: {e}", flush=True)
-                continue
+        new_tokens = self.refresh_access_token(refresh_token)
+        if not new_tokens:
+            raise RuntimeError(
+                "Token refresh failed (see logs). You may need to re-run scripts/bootstrap_auth.py."
+            )
+        return new_tokens["access_token"]

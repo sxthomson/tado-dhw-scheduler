@@ -1,91 +1,125 @@
-# Tado DHW Scheduler (AWS / Graviton / IPv6)
+# Tado DHW Scheduler (Serverless)
 
-A programmatic background worker designed to strictly manage the Domestic Hot Water (DHW) schedule for Tado X, ensuring consistent hot water priority for 4-pipe system boilers (like the Viessmann Vitodens 100-W).
+A background reconciler that enforces a Domestic Hot Water (DHW) schedule on a
+Tado X system, ensuring hot-water priority for 4-pipe boilers (e.g. Viessmann
+Vitodens 100-W).
 
-This application is fully containerized and automated via a self-healing GitHub Actions CI/CD pipeline. To minimize infrastructure costs, it runs on an AWS Graviton2 (`t4g.nano`) EC2 instance utilizing an IPv6-only secure ingress setup, bypassing AWS public IPv4 charges.
+It runs as an **AWS Lambda** triggered every 5 minutes by **EventBridge
+Scheduler**. There is no idle compute and no public IPv4 — the whole thing sits
+comfortably in the AWS free tier. Schedule and OAuth tokens live in **SSM
+Parameter Store**, so the schedule is editable from the AWS console without a
+code change or redeploy.
 
-## 🏗️ Architecture Overview
-
-* **Compute:** AWS EC2 `t4g.nano` (ARM64 / Graviton)
-* **Networking:** IPv6 ingress for SSH, NAT64 egress for IPv4 API bridging.
-* **Deployment:** GitHub Actions via AWS Systems Manager (SSM) — **No SSH ports exposed to the CI pipeline.**
-* **Registry:** Amazon ECR (Elastic Container Registry)
-* **State Management:** Persistent host volume mapping for OAuth tokens to survive container destruction.
-
----
-
-## 🚀 Deployment Guide (From Scratch)
-
-### Step 1: Provision the AWS Infrastructure
-
-The entire environment is defined as Infrastructure as Code.
-
-1. Log into your AWS Console and navigate to **CloudFormation**.
-2. Create a new stack using the provided `infrastructure.yaml` file.
-3. You will be prompted to enter the following Parameters:
-* **`KeyName`:** An existing EC2 Key Pair for manual SSH access.
-* **`MyIP`:** Your local broadband/network IPv6 address (e.g., `2a00:1f18:xxxx::/128`) to lock down SSH access.
-* **`InstanceType`:** Leave as `t4g.nano`.
-* **`GitHubUserName` / `GitHubRepoName`:** Used to scope the OIDC security role strictly to your repository.
-* **`InstanceTargetTag`:** Leave as `Tado-DHW-Scheduler` (or your preferred identifier).
-
-
-4. Acknowledge IAM resource creation and deploy the stack.
-
-### Step 2: Configure GitHub Actions
-
-We use GitHub Environments to securely store variables and deploy without hardcoded infrastructure IDs.
-
-1. Go to your GitHub Repository **Settings** > **Environments** and create an environment named `production`.
-2. Add the following **Environment variables**:
-* `AWS_ACCOUNT_ID`: Your 12-digit AWS account number (e.g., `123456789012`). *This is used to dynamically construct your secure OIDC Role ARN.*
-* `AWS_REGION`: `eu-west-2` (or your chosen region).
-* `ECR_REPOSITORY`: `tado-dhw-scheduler`
-* `CONTAINER_NAME`: `tado-worker`
-* `EC2_TARGET_TAG`: `Tado-DHW-Scheduler` *(Must exactly match the CloudFormation parameter)*
-
-
-
-### Step 3: Trigger the First Deployment
-
-With the AWS stack running and GitHub variables set, trigger the CI/CD pipeline:
-
-1. Commit and push your code to the `main` branch.
-2. The GitHub Action will:
-* Authenticate securely with AWS via OIDC.
-* Cross-compile the Python application for ARM64 architecture.
-* Push the image to Amazon ECR.
-* Instruct AWS SSM to dynamically find your tagged EC2 instance and pull/run the new container.
-
-
-
-### Step 4: First-Time Authentication (Tado OAuth)
-
-Because Tado uses a headless OAuth flow, you must manually authorize the device the very first time the container boots. The token is mapped to persistent host storage and will survive all future deployments.
-
-1. SSH into your newly provisioned EC2 instance using its IPv6 address:
-`ssh -i key.pem ec2-user@[Your-IPv6-Address]`
-2. Check the logs of the running container:
-`docker logs tado-worker`
-3. You will see a prompt indicating action is required:
-`👉 ACTION REQUIRED: Visit this URL to approve access...`
-4. Click the link provided in the logs and approve the integration.
-5. The application will detect the approval, securely save the `refresh_token` to the host directory `/home/ec2-user/tado-storage`, and immediately begin the scheduling loop.
-
----
-
-## 🛠️ Maintenance & Operations
-
-**Self-Healing Deployments**
-If you ever destroy the CloudFormation stack and rebuild it, the pipeline will automatically heal. The new EC2 instance will boot up with the `Tado-DHW-Scheduler` tag, and the GitHub Action will find it dynamically via SSM. You do not need to update any hardcoded IP addresses or Instance IDs.
-
-**Updating the Schedule**
-The DHW schedule is driven by the YAML configuration. To change your heating blocks, edit the configuration file and push to `main`. The container will rebuild and restart automatically.
-
-**Manual Restarts**
-If you need to manually intervene without pushing code, connect via IPv6 SSH and execute:
-
-```bash
-docker restart tado-worker
+## Architecture
 
 ```
+EventBridge Scheduler (rate: 5 min)
+        │ invoke
+        ▼
+   Lambda  (Python 3.11, arm64)   ── stateless, idempotent reconcile
+        ├─ GetParameter  /tado/config   (SSM String)       ← edit schedule in console
+        ├─ GetParameter  /tado/token    (SSM SecureString)  ← read OAuth token
+        ├─ PutParameter  /tado/token    (SSM SecureString)  ← write back on refresh
+        └─ HTTPS → Tado API
+```
+
+Each invocation is **idempotent**: it computes the schedule event that should
+be active now, reads the current DHW setpoint, and only pushes a change if they
+diverge (>0.5 °C). No cross-invocation state is kept, and any manual/external
+override is corrected on the next cycle.
+
+Preserved from the original design: OAuth2 Device Flow auth, the `offline_access`
+refresh-token lifecycle (survives the 8-hour access-token expiry), and API
+throttle-avoidance (only writes on divergence).
+
+## Repository layout
+
+| Path | Purpose |
+|------|---------|
+| `src/main.py` | Lambda handler + reconciliation logic |
+| `src/config_manager.py` | Loads schedule from the SSM config parameter |
+| `src/tado_auth.py` | OAuth token load/refresh backed by the SSM SecureString |
+| `src/tado_client.py` | Tado API client (setpoint get/set, retries, clamping) |
+| `scripts/bootstrap_auth.py` | One-time local OAuth device-flow bootstrap |
+| `template.yaml` | SAM stack (Lambda, schedule, config param, IAM) |
+| `iac/deploy-role.yaml` | One-time bootstrap of the GitHub Actions deploy role |
+| `.github/workflows/deploy.yml` | CI: build + deploy the SAM stack on push to `main` |
+| `config/config.yaml` | Reference copy of the schedule (seeds the SSM param) |
+
+## First-time setup
+
+### 1. Create the GitHub Actions deploy role (once, from your laptop)
+
+Requires local AWS admin credentials.
+
+```bash
+aws cloudformation deploy \
+  --template-file iac/deploy-role.yaml \
+  --stack-name tado-dhw-deploy-role \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides GitHubOrg=<your-gh-username> GitHubRepo=tado-dhw-scheduler
+```
+
+If your account already has a GitHub OIDC provider (e.g. from the old EC2
+stack), add `ExistingOidcProviderArn=arn:aws:iam::<acct>:oidc-provider/token.actions.githubusercontent.com`
+to `--parameter-overrides` so it reuses the existing one.
+
+Grab the role ARN from the stack outputs:
+
+```bash
+aws cloudformation describe-stacks --stack-name tado-dhw-deploy-role \
+  --query "Stacks[0].Outputs[?OutputKey=='DeployRoleArn'].OutputValue" --output text
+```
+
+### 2. Configure GitHub
+
+In the repo: **Settings → Environments → `production`**, add **variables**:
+
+| Variable | Value |
+|----------|-------|
+| `AWS_DEPLOY_ROLE_ARN` | the role ARN from step 1 |
+| `AWS_REGION` | e.g. `eu-west-2` |
+
+### 3. Deploy the app
+
+Push to `main` (or run the `Deploy Tado DHW Scheduler` workflow manually). This
+creates the Lambda, the 5-minute schedule, and the `/tado/config` parameter.
+
+### 4. Seed the OAuth token (once, from your laptop)
+
+The Tado Device Flow needs a human to approve access in a browser, so it can't
+run in Lambda. Run it locally — it writes the token into SSM where the Lambda
+reads it:
+
+```bash
+pip install boto3 requests
+python scripts/bootstrap_auth.py --region eu-west-2
+```
+
+Open the printed URL, approve, done. Every scheduled run afterwards is
+autonomous via the stored refresh token.
+
+## Operations
+
+**Change the schedule** — edit the `/tado/config` parameter in the AWS console
+(*Systems Manager → Parameter Store*). The next run (≤5 min) picks it up. No PR,
+no deploy. Keep `config/config.yaml` in sync if you want the repo to reflect the
+live schedule.
+
+**Re-authenticate** — if the refresh token is ever revoked, re-run
+`scripts/bootstrap_auth.py`.
+
+**Logs** — CloudWatch Logs group `/aws/lambda/tado-dhw-scheduler`. Each run logs
+whether it was a no-op or applied a change.
+
+**Run cadence / timezone** — override the `ScheduleExpression` and
+`ScheduleTimezone` stack parameters in `template.yaml` (defaults: `rate(5 minutes)`,
+`Europe/London`).
+
+## Migrating from the old EC2 architecture
+
+This project previously ran a 24/7 container on an EC2 `t4g.nano` instance. Once
+the serverless stack is deployed and authenticated (steps above), delete the old
+CloudFormation stack in the AWS console to stop the EC2 charges. That old stack
+also owned the previous OIDC provider and deploy role — see step 1 for handling
+the OIDC provider so the two don't collide.

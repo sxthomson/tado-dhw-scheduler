@@ -1,0 +1,136 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ONE-TIME BOOTSTRAP. Creates the GitHub OIDC provider (optional) and a
+  least-privilege IAM role that GitHub Actions assumes to deploy the Tado DHW
+  Scheduler SAM stack. Deploy this once by hand from your laptop; CI handles
+  everything after.
+
+  Example:
+    aws cloudformation deploy \
+      --template-file iac/deploy-role.yaml \
+      --stack-name tado-dhw-deploy-role \
+      --capabilities CAPABILITY_NAMED_IAM \
+      --parameter-overrides GitHubOrg=<your-gh-username> GitHubRepo=tado-dhw-scheduler
+
+  If your AWS account already has a GitHub OIDC provider (e.g. left over from
+  the old EC2 stack), pass its ARN as ExistingOidcProviderArn=... so this stack
+  reuses it instead of trying (and failing) to create a duplicate.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Description: GitHub org or username that owns the repo (e.g. sxthomson).
+  GitHubRepo:
+    Type: String
+    Default: tado-dhw-scheduler
+    Description: Repository name.
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: ARN of an existing GitHub OIDC provider. Leave blank to create one.
+
+Conditions:
+  CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, ""]
+
+Resources:
+  GithubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: tado-github-deploy-role
+      # Trust: only GitHub Actions runs from THIS repo may assume the role.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateOidcProvider
+                - !Ref GithubOidcProvider
+                - !Ref ExistingOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${GitHubRepo}:*
+      Policies:
+        - PolicyName: sam-deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Broad within each service but limited to the services SAM needs
+              # to build/deploy this app. Deploy roles are inherently powerful;
+              # the tight trust policy above is the primary control.
+              - Sid: CloudFormation
+                Effect: Allow
+                Action: cloudformation:*
+                Resource: '*'
+              - Sid: Lambda
+                Effect: Allow
+                Action: lambda:*
+                Resource: '*'
+              - Sid: Scheduler
+                Effect: Allow
+                Action: scheduler:*
+                Resource: '*'
+              - Sid: SsmParameters
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:DeleteParameter
+                  - ssm:AddTagsToResource
+                  - ssm:RemoveTagsFromResource
+                  - ssm:ListTagsForResource
+                Resource: '*'
+              - Sid: IamForLambdaExecutionRole
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource: '*'
+              # SAM's managed artifact bucket (created by `sam deploy --resolve-s3`).
+              - Sid: SamManagedArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketPolicy
+                  - s3:PutEncryptionConfiguration
+                  - s3:PutBucketVersioning
+                  - s3:PutBucketTagging
+                  - s3:PutBucketPublicAccessBlock
+                Resource:
+                  - arn:aws:s3:::aws-sam-cli-managed-*
+                  - arn:aws:s3:::aws-sam-cli-managed-*/*
+
+Outputs:
+  DeployRoleArn:
+    Description: Set this as the GitHub Actions variable AWS_DEPLOY_ROLE_ARN.
+    Value: !GetAtt DeployRole.Arn
