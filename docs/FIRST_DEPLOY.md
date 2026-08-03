@@ -40,6 +40,40 @@ continuing.
 
 ---
 
+## Migrating from the old EC2 stack? Delete it first
+
+**Skip this if you're deploying fresh** (no prior EC2 version).
+
+The original EC2 deployment lives in a CloudFormation stack named
+`tado-dhw-scheduler` — **the same name the new app stack uses** — and it owns the
+`tado-github-deploy-role` IAM role and the GitHub OIDC provider. The new setup
+reuses all three names, so you must delete the old stack **before step 3**, not
+after. Tell-tale sign you skipped this: step 3 fails with
+`tado-github-deploy-role already exists in stack .../tado-dhw-scheduler/...`.
+
+Do this as an **admin/root** identity in your personal account — the scoped
+bootstrap user from step 1 can't delete the old EC2/ECR resources.
+
+1. **CloudFormation → Stacks → `tado-dhw-scheduler` → Delete**, and wait for
+   `DELETE_COMPLETE`.
+   - **ECR gotcha:** if the stack's ECR repo still contains images, the delete
+     fails on that resource. Empty the repo (delete the images) and retry, or
+     delete the repo manually, then retry the stack delete.
+2. If an earlier failed attempt left a `tado-dhw-deploy-role` stack in
+   `ROLLBACK_COMPLETE`, delete that too — CloudFormation won't re-create over a
+   rolled-back stack.
+
+Implications, all expected:
+
+- Your **current hot-water automation stops** until the new stack is live and
+  token-seeded (steps 3–6). Fine for a short cutover.
+- The old EC2 instance and its stored OAuth token are destroyed — you re-seed the
+  token in step 6.
+- Because the old OIDC provider and role are now gone, in step 3 you **leave
+  `ExistingOidcProviderArn` blank** and let the template create fresh ones.
+
+---
+
 ## 1. Create the bootstrap operator identity (once)
 
 CI authenticates with short-lived OIDC credentials and needs no stored keys. But
@@ -140,17 +174,20 @@ aws cloudformation deploy \
   --parameter-overrides GitHubOrg=<your-gh-username> GitHubRepo=tado-dhw-scheduler
 ```
 
-**OIDC collision?** If it fails because a GitHub OIDC provider already exists in
-the account (e.g. left over from the old EC2 stack), re-run adding the existing
-provider's ARN so the stack reuses it instead of creating a duplicate:
+**Collision on `tado-github-deploy-role` or the OIDC provider?** That means the
+old EC2 stack is still up — it owns both (and the app stack name too). Go do
+[Migrating from the old EC2 stack](#migrating-from-the-old-ec2-stack-delete-it-first)
+above, then retry this step with `ExistingOidcProviderArn` left blank.
+
+If instead an OIDC provider exists for some *other* reason you don't want to
+delete, reuse it rather than creating a duplicate:
 
 ```bash
   ExistingOidcProviderArn=arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com
 ```
 
-Find that ARN in the console under **IAM → Access management → Identity
-providers** (it's a global resource — region doesn't matter), or via
-`aws iam list-open-id-connect-providers`.
+Find that ARN under **IAM → Access management → Identity providers** (global —
+region doesn't matter), or via `aws iam list-open-id-connect-providers`.
 
 Then read the role ARN from the outputs (you'll need it in step 4):
 
@@ -229,10 +266,9 @@ Once the Lambda is confirmed working:
 - **Delete the bootstrap access key** — IAM → `tado-bootstrap` → Security
   credentials → deactivate & delete the key. Keep the *user* (with no active
   keys) so re-runs are easy. CI needs no keys.
-- **Tear down the old EC2 stack** (if migrating) — delete the previous
-  CloudFormation stack in the console. This is what actually stops the EC2
-  charges. Note it also removes the old OIDC provider and deploy role, which is
-  why step 3 has the `ExistingOidcProviderArn` escape hatch.
+- **Old EC2 stack** — if you're migrating, you already deleted it up front (see
+  [Migrating from the old EC2 stack](#migrating-from-the-old-ec2-stack-delete-it-first)),
+  which is what stops the EC2 charges. Nothing left to tear down here.
 
 ---
 
@@ -256,6 +292,7 @@ You rarely need this — CI handles ongoing deploys. But to run a manual step ag
 |---------|-------------|
 | `The config profile (tado-personal) could not be found` | Profile was never written. Re-run `aws configure [sso] --profile tado-personal` to completion; don't `export AWS_PROFILE` before it exists. See the gotcha in step 1. |
 | `AccessDenied` on `iam:*` / `cloudformation:*` | You're on the wrong (corporate) identity, or the bootstrap policy placeholders weren't substituted. Check `aws sts get-caller-identity` and the inline policy JSON. |
-| `cloudformation deploy` fails: OIDC provider already exists | Pass `ExistingOidcProviderArn=...` (step 3). |
+| step 3 fails: `tado-github-deploy-role already exists in stack .../tado-dhw-scheduler/...` | The old EC2 stack still exists and owns that role, the OIDC provider, and the app stack name. Delete it first — see [Migrating from the old EC2 stack](#migrating-from-the-old-ec2-stack-delete-it-first). |
+| `cloudformation deploy` fails: OIDC provider already exists (not from the old stack) | Reuse it: pass `ExistingOidcProviderArn=...` (step 3). |
 | CI workflow fails at "Configure AWS credentials" | `AWS_DEPLOY_ROLE_ARN` / `AWS_REGION` not set in the `production` environment, or the deploy role's trust policy doesn't match `repo:<org>/<repo>`. |
 | Lambda logs "No Tado token found" | Token not seeded yet — run step 6. |

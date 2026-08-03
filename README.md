@@ -90,10 +90,10 @@ whether it was a no-op or applied a change.
 
 ## Migrating from the old EC2 architecture
 
-This project previously ran a 24/7 container on an EC2 `t4g.nano` instance. Once
-the serverless stack is deployed and authenticated, delete the old CloudFormation
-stack in the AWS console to stop the EC2 charges. That old stack also owned the
-previous OIDC provider and deploy role, so deleting it removes them — the
-deploy-role template's `ExistingOidcProviderArn` parameter handles the collision
-if you deploy the new role before deleting the old stack. Full sequence and
-caveats are in [`docs/FIRST_DEPLOY.md`](docs/FIRST_DEPLOY.md).
+This project previously ran a 24/7 container on an EC2 `t4g.nano` instance in a
+CloudFormation stack named `tado-dhw-scheduler`. That stack owns the
+`tado-github-deploy-role` IAM role, the GitHub OIDC provider, **and the same
+stack name the new app uses** — so you must **delete it before deploying the new
+stack**, not after. Deleting it is also what stops the EC2 charges. Full delete-first
+sequence and caveats (ECR gotcha, downtime) are in
+[`docs/FIRST_DEPLOY.md`](docs/FIRST_DEPLOY.md#migrating-from-the-old-ec2-stack-delete-it-first).
