@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Tado DHW Scheduler - serverless. A Lambda reconciles the DHW setpoint on a
+  cron schedule (EventBridge Scheduler). Config lives in an SSM String param;
+  OAuth tokens live in an SSM SecureString param. No idle compute, no IPv4.
+
+Parameters:
+  ConfigParamName:
+    Type: String
+    Default: /tado/config
+    Description: SSM String parameter holding the (human-editable) schedule YAML.
+  TokenParamName:
+    Type: String
+    Default: /tado/token
+    Description: >
+      SSM SecureString parameter holding the OAuth tokens. NOT created here
+      (CloudFormation cannot create SecureString params) -- it is seeded by
+      scripts/bootstrap_auth.py. The Lambda is granted access to it by ARN.
+  ScheduleExpression:
+    Type: String
+    Default: rate(5 minutes)
+    Description: How often the reconciler runs.
+  ScheduleTimezone:
+    Type: String
+    Default: Europe/London
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Architectures: [arm64]
+    Timeout: 60
+    MemorySize: 128
+
+Resources:
+  # Human-editable schedule. Edit this in the console (Systems Manager >
+  # Parameter Store) and the next invocation picks it up.
+  ConfigParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Ref ConfigParamName
+      Type: String
+      Tier: Standard
+      Description: Tado DHW schedule (edit here to change the schedule; no redeploy needed).
+      Value: |
+        preferences:
+          timezone: "Europe/London"
+
+        schedule:
+          # --- DAILY Shower Ready ---
+          - name: "Pre-load ON"
+            days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+            time: "04:45"
+            temperature: 60
+
+          - name: "Pre-load OFF"
+            days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+            time: "05:30"
+            temperature: 35
+
+          # --- DAILY Shower Recharge ---
+          - name: "Shower Recharge ON"
+            days: ["MON", "TUE", "WED", "THU", "FRI"]
+            time: "08:00"
+            temperature: 50
+
+          - name: "Shower Recharge OFF"
+            days: ["MON", "TUE", "WED", "THU", "FRI"]
+            time: "09:00"
+            temperature: 35
+
+          - name: "Weekend Shower Recharge ON"
+            days: ["SAT", "SUN"]
+            time: "09:00"
+            temperature: 50
+
+          - name: "Weekend Shower Recharge OFF"
+            days: ["SAT", "SUN"]
+            time: "11:00"
+            temperature: 35
+
+          # --- DAILY (Evening Top-up) ---
+          - name: "Daily: Evening Top-up ON"
+            days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+            time: "16:00"
+            temperature: 50
+
+          - name: "Daily: Evening Top-up OFF"
+            days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+            time: "16:30"
+            temperature: 35
+
+  SchedulerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: tado-dhw-scheduler
+      CodeUri: src/
+      Handler: main.handler
+      Description: Reconciles Tado DHW setpoint against the schedule.
+      Environment:
+        Variables:
+          CONFIG_PARAM_NAME: !Ref ConfigParamName
+          TOKEN_PARAM_NAME: !Ref TokenParamName
+      Policies:
+        # Least privilege: read config + token, write token on refresh only.
+        - Statement:
+            - Sid: ReadConfigAndToken
+              Effect: Allow
+              Action: ssm:GetParameter
+              Resource:
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ConfigParamName}
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TokenParamName}
+            - Sid: WriteTokenOnRefresh
+              Effect: Allow
+              Action: ssm:PutParameter
+              Resource:
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TokenParamName}
+            - Sid: DecryptEncryptSsmSecureStrings
+              Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:Encrypt
+              # Scoped so this only works for SSM's own crypto operations.
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+      Events:
+        CronSchedule:
+          Type: ScheduleV2   # EventBridge Scheduler
+          Properties:
+            ScheduleExpression: !Ref ScheduleExpression
+            ScheduleExpressionTimezone: !Ref ScheduleTimezone
+
+Outputs:
+  FunctionName:
+    Value: !Ref SchedulerFunction
+  ConfigParameterName:
+    Description: Edit this parameter to change the schedule.
+    Value: !Ref ConfigParamName
+  TokenParameterName:
+    Description: Seed this with scripts/bootstrap_auth.py before the first run.
+    Value: !Ref TokenParamName
