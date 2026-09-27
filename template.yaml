@@ -17,6 +17,14 @@ Parameters:
       SSM SecureString parameter holding the OAuth tokens. NOT created here
       (CloudFormation cannot create SecureString params) -- it is seeded by
       scripts/bootstrap_auth.py. The Lambda is granted access to it by ARN.
+  LastAppliedParamName:
+    Type: String
+    Default: /tado/last_applied
+    Description: >
+      SSM String parameter holding the setpoint the reconciler last wrote.
+      Lets it tell "schedule moved on" apart from "a manual boost happened"
+      so it can respect an app-driven boost for a grace window instead of
+      overwriting it. Operational state only -- not meant to be hand-edited.
   ScheduleExpression:
     Type: String
     Default: rate(5 minutes)
@@ -45,6 +53,10 @@ Resources:
       Value: |
         preferences:
           timezone: "Europe/London"
+
+          # How long to respect a manual boost via the Tado app before the
+          # schedule reasserts control. Tune freely -- no redeploy needed.
+          override_grace_minutes: 60
 
         schedule:
           # --- DAILY Shower Ready ---
@@ -90,6 +102,17 @@ Resources:
             time: "16:30"
             temperature: 35
 
+  # Operational state the reconciler owns end-to-end (never hand-edited):
+  # the setpoint it last wrote, used to detect manual overrides. Seeded empty.
+  LastAppliedParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Ref LastAppliedParamName
+      Type: String
+      Tier: Standard
+      Description: Reconciler-owned state (last-applied setpoint) -- do not hand-edit.
+      Value: '{}'
+
   SchedulerFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -101,20 +124,24 @@ Resources:
         Variables:
           CONFIG_PARAM_NAME: !Ref ConfigParamName
           TOKEN_PARAM_NAME: !Ref TokenParamName
+          LAST_APPLIED_PARAM_NAME: !Ref LastAppliedParamName
       Policies:
-        # Least privilege: read config + token, write token on refresh only.
+        # Least privilege: read config + token + tracker state, write token
+        # (on refresh) and tracker state (every reconcile) only.
         - Statement:
-            - Sid: ReadConfigAndToken
+            - Sid: ReadConfigTokenAndTrackerState
               Effect: Allow
               Action: ssm:GetParameter
               Resource:
                 - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ConfigParamName}
                 - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TokenParamName}
-            - Sid: WriteTokenOnRefresh
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${LastAppliedParamName}
+            - Sid: WriteTokenOnRefreshAndTrackerState
               Effect: Allow
               Action: ssm:PutParameter
               Resource:
                 - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TokenParamName}
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${LastAppliedParamName}
             - Sid: DecryptEncryptSsmSecureStrings
               Effect: Allow
               Action:
@@ -141,3 +168,6 @@ Outputs:
   TokenParameterName:
     Description: Seed this with scripts/bootstrap_auth.py before the first run.
     Value: !Ref TokenParamName
+  LastAppliedParameterName:
+    Description: Reconciler-owned override-tracking state -- do not hand-edit.
+    Value: !Ref LastAppliedParamName
