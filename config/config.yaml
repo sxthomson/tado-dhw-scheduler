@@ -1,5 +1,8 @@
 preferences:
   timezone: "Europe/London"
+  # How long to respect a manual boost via the Tado app before the schedule
+  # reasserts control. Tune freely -- no redeploy needed.
+  override_grace_minutes: 60
 
 schedule:
   # --- DAILY Shower Ready ---

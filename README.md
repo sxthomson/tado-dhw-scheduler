@@ -16,17 +16,29 @@ code change or redeploy.
 EventBridge Scheduler (rate: 5 min)
         │ invoke
         ▼
-   Lambda  (Python 3.11, arm64)   ── stateless, idempotent reconcile
-        ├─ GetParameter  /tado/config   (SSM String)       ← edit schedule in console
-        ├─ GetParameter  /tado/token    (SSM SecureString)  ← read OAuth token
-        ├─ PutParameter  /tado/token    (SSM SecureString)  ← write back on refresh
+   Lambda  (Python 3.11, arm64)   ── idempotent reconcile + override tracking
+        ├─ GetParameter  /tado/config        (SSM String)       ← edit schedule in console
+        ├─ GetParameter  /tado/token         (SSM SecureString)  ← read OAuth token
+        ├─ PutParameter  /tado/token         (SSM SecureString)  ← write back on refresh
+        ├─ GetParameter  /tado/last_applied  (SSM String)       ← what we set last time
+        ├─ PutParameter  /tado/last_applied  (SSM String)       ← record every write
         └─ HTTPS → Tado API
 ```
 
 Each invocation is **idempotent**: it computes the schedule event that should
 be active now, reads the current DHW setpoint, and only pushes a change if they
-diverge (>0.5 °C). No cross-invocation state is kept, and any manual/external
-override is corrected on the next cycle.
+diverge (>0.5 °C). The only cross-invocation state is one small SSM parameter
+(`/tado/last_applied`) recording the setpoint the Lambda itself last wrote —
+just enough to tell "the schedule moved on since our last write" apart from
+"something else changed it since our last write" (i.e. a manual boost via the
+Tado app). **Boosting hot water**: just use the Tado app as normal — the
+reconciler detects that the setpoint no longer matches what it last set, and
+leaves it alone for `override_grace_minutes` (default 60, tunable in
+`preferences:`) before reasserting the schedule. Tado's API gives no explicit
+"this was a manual override" signal (confirmed by probing the live API before
+building this — see git history on this section for the investigation), so
+this last-applied-memory approach is a deliberate fallback rather than reading
+an official overlay/termination field.
 
 Preserved from the original design: OAuth2 Device Flow auth, the `offline_access`
 refresh-token lifecycle (survives the 8-hour access-token expiry), and API
@@ -40,6 +52,7 @@ throttle-avoidance (only writes on divergence).
 | `src/config_manager.py` | Loads schedule from the SSM config parameter |
 | `src/tado_auth.py` | OAuth token load/refresh backed by the SSM SecureString |
 | `src/tado_client.py` | Tado API client (setpoint get/set, retries, clamping) |
+| `src/override_tracker.py` | Remembers the last setpoint we wrote (SSM String), to detect manual boosts |
 | `scripts/bootstrap_auth.py` | One-time local OAuth device-flow bootstrap |
 | `template.yaml` | SAM stack (Lambda, schedule, config param, IAM) |
 | `iac/deploy-role.yaml` | One-time bootstrap of the GitHub Actions deploy role |
@@ -72,6 +85,15 @@ At a glance:
 6. **Verify**, then tear down the old EC2 stack.
 
 ## Operations
+
+**Boost hot water on demand** — just use the manual/boost control in the Tado
+app, as normal. The next reconcile cycle notices the setpoint no longer
+matches what it last wrote, and leaves it alone for `override_grace_minutes`
+(default 60 min) before resuming the schedule. No app on your side, no second
+"boost" button — the Tado app's own control is the trigger. Tune the grace
+window via `override_grace_minutes` in `preferences:` in the `/tado/config`
+parameter (same place as the schedule, no redeploy needed). Don't hand-edit
+`/tado/last_applied` — it's reconciler-owned bookkeeping, not config.
 
 **Change the schedule** — edit the `/tado/config` parameter in the AWS console
 (*Systems Manager → Parameter Store*). The next run (≤5 min) picks it up. No PR,
