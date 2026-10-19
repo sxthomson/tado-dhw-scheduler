@@ -25,10 +25,20 @@ Parameters:
       Lets it tell "schedule moved on" apart from "a manual boost happened"
       so it can respect an app-driven boost for a grace window instead of
       overwriting it. Operational state only -- not meant to be hand-edited.
+  FlowLastAppliedParamName:
+    Type: String
+    Default: /tado/flow_last_applied
+    Description: >
+      SSM String parameter holding the max flow temperature slider value the
+      reconciler last wrote. Same purpose as LastAppliedParamName, for the flow
+      ceiling instead of DHW -- kept separate so neither reconciler can clobber
+      the other's state. Operational state only -- not meant to be hand-edited.
   ScheduleExpression:
     Type: String
     Default: rate(5 minutes)
-    Description: How often the reconciler runs.
+    Description: >
+      How often the reconciler runs. The flow/telemetry slow loop assumes
+      5-minute ticks (main.TICK_SECONDS) -- change both together.
   ScheduleTimezone:
     Type: String
     Default: Europe/London
@@ -37,7 +47,7 @@ Globals:
   Function:
     Runtime: python3.11
     Architectures: [arm64]
-    Timeout: 60
+    Timeout: 120
     MemorySize: 128
 
 Resources:
@@ -60,6 +70,7 @@ Resources:
 
         schedule:
           # --- DAILY Shower Ready ---
+
           - name: "Pre-load ON"
             days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
             time: "04:45"
@@ -68,28 +79,7 @@ Resources:
           - name: "Pre-load OFF"
             days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
             time: "05:30"
-            temperature: 35
-
-          # --- DAILY Shower Recharge ---
-          - name: "Shower Recharge ON"
-            days: ["MON", "TUE", "WED", "THU", "FRI"]
-            time: "08:00"
-            temperature: 50
-
-          - name: "Shower Recharge OFF"
-            days: ["MON", "TUE", "WED", "THU", "FRI"]
-            time: "09:00"
-            temperature: 35
-
-          - name: "Weekend Shower Recharge ON"
-            days: ["SAT", "SUN"]
-            time: "09:00"
-            temperature: 50
-
-          - name: "Weekend Shower Recharge OFF"
-            days: ["SAT", "SUN"]
-            time: "11:00"
-            temperature: 35
+            temperature: 30
 
           # --- DAILY (Evening Top-up) ---
           - name: "Daily: Evening Top-up ON"
@@ -100,7 +90,7 @@ Resources:
           - name: "Daily: Evening Top-up OFF"
             days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
             time: "16:30"
-            temperature: 35
+            temperature: 30
 
   # Operational state the reconciler owns end-to-end (never hand-edited):
   # the setpoint it last wrote, used to detect manual overrides. Seeded empty.
@@ -113,18 +103,36 @@ Resources:
       Description: Reconciler-owned state (last-applied setpoint) -- do not hand-edit.
       Value: '{}'
 
+  # Same as above, for the max flow temperature slider. Separate parameter so the
+  # DHW reconciler's whole-object saves can never wipe flow state (or vice versa).
+  FlowLastAppliedParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Ref FlowLastAppliedParamName
+      Type: String
+      Tier: Standard
+      Description: Reconciler-owned state (last-applied max flow slider) -- do not hand-edit.
+      Value: '{}'
+
   SchedulerFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: tado-dhw-scheduler
       CodeUri: src/
       Handler: main.handler
-      Description: Reconciles Tado DHW setpoint against the schedule.
+      Description: Reconciles Tado DHW setpoint against the schedule, and the max flow ceiling against the weather.
+      # EventBridge Scheduler invokes asynchronously; Lambda's default 2 retries could
+      # overlap the next tick and race the OAuth token refresh. Every tick is an
+      # idempotent reconcile anyway, so the next one (<=5 min) is the retry.
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0
+        MaximumEventAgeInSeconds: 240
       Environment:
         Variables:
           CONFIG_PARAM_NAME: !Ref ConfigParamName
           TOKEN_PARAM_NAME: !Ref TokenParamName
           LAST_APPLIED_PARAM_NAME: !Ref LastAppliedParamName
+          FLOW_LAST_APPLIED_PARAM_NAME: !Ref FlowLastAppliedParamName
       Policies:
         # Least privilege: read config + token + tracker state, write token
         # (on refresh) and tracker state (every reconcile) only.
@@ -136,12 +144,14 @@ Resources:
                 - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ConfigParamName}
                 - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TokenParamName}
                 - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${LastAppliedParamName}
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${FlowLastAppliedParamName}
             - Sid: WriteTokenOnRefreshAndTrackerState
               Effect: Allow
               Action: ssm:PutParameter
               Resource:
                 - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TokenParamName}
                 - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${LastAppliedParamName}
+                - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${FlowLastAppliedParamName}
             - Sid: DecryptEncryptSsmSecureStrings
               Effect: Allow
               Action:
@@ -158,6 +168,9 @@ Resources:
           Properties:
             ScheduleExpression: !Ref ScheduleExpression
             ScheduleExpressionTimezone: !Ref ScheduleTimezone
+            # Exact scheduled time (a Scheduler context attribute), so the slow-loop
+            # gate in main.is_slow_tick isn't thrown off by start-up jitter.
+            Input: '{"scheduled_time": "<aws.scheduler.scheduled-time>"}'
 
 Outputs:
   FunctionName:
@@ -171,3 +184,6 @@ Outputs:
   LastAppliedParameterName:
     Description: Reconciler-owned override-tracking state -- do not hand-edit.
     Value: !Ref LastAppliedParamName
+  FlowLastAppliedParameterName:
+    Description: Reconciler-owned max flow slider state -- do not hand-edit (reset to {} to end a manual override early).
+    Value: !Ref FlowLastAppliedParamName

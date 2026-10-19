@@ -16,6 +16,10 @@ class OverrideTracker:
     manual boost via the Tado app) changed the setpoint since our last
     write" -- the Tado API itself gives us no such signal (see main.py).
 
+    Two instances run side by side on separate parameters: DHW (/tado/last_applied)
+    and the max flow slider (/tado/flow_last_applied). Each `save()` replaces the
+    whole object, which is why they must never share a parameter.
+
     Schema (all keys optional/absent when unset):
         last_applied_temp: float  -- setpoint we last wrote via the API
         last_applied_at:   str    -- ISO timestamp of that write

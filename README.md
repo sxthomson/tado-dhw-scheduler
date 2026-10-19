@@ -6,7 +6,12 @@ Vitodens 100-W).
 
 It runs as an **AWS Lambda** triggered every 5 minutes by **EventBridge
 Scheduler**. There is no idle compute and no public IPv4 — the whole thing sits
-comfortably in the AWS free tier. Schedule and OAuth tokens live in **SSM
+comfortably in the AWS free tier.
+
+Optionally it also drives Tado's **Maximum Flow Temperature** slider from the
+outdoor temperature (lower in mild weather, higher near freezing — Tado's own
+slider shifts its whole weather curve, so a single setting can't do both), and
+logs per-room telemetry for tuning that curve and spotting undersized radiators. Schedule and OAuth tokens live in **SSM
 Parameter Store**, so the schedule is editable from the AWS console without a
 code change or redeploy.
 
@@ -22,7 +27,10 @@ EventBridge Scheduler (rate: 5 min)
         ├─ PutParameter  /tado/token         (SSM SecureString)  ← write back on refresh
         ├─ GetParameter  /tado/last_applied  (SSM String)       ← what we set last time
         ├─ PutParameter  /tado/last_applied  (SSM String)       ← record every write
-        └─ HTTPS → Tado API
+        ├─ Get/PutParameter /tado/flow_last_applied (SSM String) ← same, for the flow slider
+        ├─ HTTPS → Tado API                                     ← DHW every tick; weather,
+        │                                                          flow + rooms every 15 min
+        └─ CloudWatch Logs  TADO_TELEMETRY_V1 {json}            ← one record per 15 min
 ```
 
 Each invocation is **idempotent**: it computes the schedule event that should
@@ -53,6 +61,10 @@ throttle-avoidance (only writes on divergence).
 | `src/tado_auth.py` | OAuth token load/refresh backed by the SSM SecureString |
 | `src/tado_client.py` | Tado API client (setpoint get/set, retries, clamping) |
 | `src/override_tracker.py` | Remembers the last setpoint we wrote (SSM String), to detect manual boosts |
+| `src/flow_reconciler.py` | Outdoor temperature → max flow slider curve, deadband, manual-override handling |
+| `src/telemetry.py` | Compact per-room/home snapshot logged every 15 min |
+| `scripts/flow_report.py` | Local report over the telemetry: Tado's curve by outdoor band, per-room radiator verdicts |
+| `tests/` | pytest suite (fakes only, no AWS/network) |
 | `scripts/bootstrap_auth.py` | One-time local OAuth device-flow bootstrap |
 | `template.yaml` | SAM stack (Lambda, schedule, config param, IAM) |
 | `iac/deploy-role.yaml` | One-time bootstrap of the GitHub Actions deploy role |
@@ -99,6 +111,33 @@ parameter (same place as the schedule, no redeploy needed). Don't hand-edit
 (*Systems Manager → Parameter Store*). The next run (≤5 min) picks it up. No PR,
 no deploy. Keep `config/config.yaml` in sync if you want the repo to reflect the
 live schedule.
+
+**Weather-driven max flow temperature** — off unless enabled. Add to the
+`/tado/config` parameter in the console (not the template — see `CLAUDE.md`):
+
+```yaml
+telemetry:
+  enabled: true
+flow_temperature:
+  enabled: true
+  dry_run: true          # log decisions only; set false once they look right
+  curve:                 # outdoor °C -> app slider °C, linear between points
+    - { outdoor_c: 10, slider_c: 64 }
+    - { outdoor_c: 5,  slider_c: 68 }
+    - { outdoor_c: 0,  slider_c: 70 }
+    - { outdoor_c: -3, slider_c: 75 }
+  min_change_c: 2
+  override_grace_minutes: 720
+```
+
+The curve values are **slider positions**, not flow temperatures: Tado scales the
+slider down by its own weather adjustment (about 0.8 × slider + 3 at 10 °C), so
+slider 64 ≈ 54 °C effective in mild weather. Moving the slider in the Tado app is
+respected for `override_grace_minutes`, then the curve takes over again. To tune,
+run `python scripts/flow_report.py --region <region> --days 14` and adjust the
+`slider_c` nearest the outdoor band in question: raise it where several rooms
+struggle, lower it where no room needs more than ~70% valve. If Tado's
+auto-adaptation is ever switched off, the reconciler stops touching the slider.
 
 **Re-authenticate** — if the refresh token is ever revoked, re-run
 `scripts/bootstrap_auth.py`.
