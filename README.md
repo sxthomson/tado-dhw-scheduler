@@ -122,17 +122,16 @@ flow_temperature:
   enabled: true
   dry_run: true          # log decisions only; set false once they look right
   curve:                 # outdoor °C -> app slider °C, linear between points
-    - { outdoor_c: 10, slider_c: 64 }
-    - { outdoor_c: 5,  slider_c: 68 }
-    - { outdoor_c: 0,  slider_c: 70 }
-    - { outdoor_c: -3, slider_c: 75 }
+    - { outdoor_c: 8, slider_c: 65 }   # mild (8 °C and warmer): the normal value
+    - { outdoor_c: 3, slider_c: 67 }
+    - { outdoor_c: 0, slider_c: 70 }   # freezing and below: the max
   min_change_c: 2
   override_grace_minutes: 720
 ```
 
 The curve values are **slider positions**, not flow temperatures: Tado scales the
 slider down by its own weather adjustment (about 0.8 × slider + 3 at 10 °C), so
-slider 64 ≈ 54 °C effective in mild weather. Moving the slider in the Tado app is
+slider 65 ≈ 55 °C effective in mild weather. Moving the slider in the Tado app is
 respected for `override_grace_minutes`, then the curve takes over again. To tune,
 run `python scripts/flow_report.py --region <region> --days 14` and adjust the
 `slider_c` nearest the outdoor band in question: raise it where several rooms
