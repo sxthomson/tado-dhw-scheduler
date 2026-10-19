@@ -1,11 +1,13 @@
 preferences:
   timezone: "Europe/London"
-  # How long to respect a manual boost via the Tado app before the schedule
-  # reasserts control. Tune freely -- no redeploy needed.
+
+  # How long to respect a manual boost via the Tado app before the
+  # schedule reasserts control. Tune freely -- no redeploy needed.
   override_grace_minutes: 60
 
 schedule:
   # --- DAILY Shower Ready ---
+
   - name: "Pre-load ON"
     days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
     time: "04:45"
@@ -14,28 +16,7 @@ schedule:
   - name: "Pre-load OFF"
     days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
     time: "05:30"
-    temperature: 35
-
-  # --- DAILY Shower Recharge ---
-  - name: "Shower Recharge ON"
-    days: ["MON", "TUE", "WED", "THU", "FRI"]
-    time: "08:00"
-    temperature: 50
-
-  - name: "Shower Recharge OFF"
-    days: ["MON", "TUE", "WED", "THU", "FRI"]
-    time: "09:00"
-    temperature: 35
-
-  - name: "Weekend Shower Recharge ON"
-    days: ["SAT", "SUN"]
-    time: "09:00"
-    temperature: 50
-
-  - name: "Weekend Shower Recharge OFF"
-    days: ["SAT", "SUN"]
-    time: "11:00"
-    temperature: 35
+    temperature: 30
 
   # --- DAILY (Evening Top-up) ---
   - name: "Daily: Evening Top-up ON"
@@ -46,4 +27,25 @@ schedule:
   - name: "Daily: Evening Top-up OFF"
     days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
     time: "16:30"
-    temperature: 35
+    temperature: 30
+
+# --- Optional: weather-driven max flow temperature + room telemetry ----------
+# Not in the template seed on purpose: add these to the live /tado/config
+# parameter by hand (editing the template's ConfigParameter overwrites the live
+# value). Missing or `enabled: false` = off; DHW is unaffected either way.
+telemetry:
+  enabled: true            # log rooms/weather/flow every 15 min (TADO_TELEMETRY_V1)
+
+flow_temperature:
+  enabled: true
+  dry_run: true            # log what it would set without writing; flip once happy
+  # Outdoor temp (C) -> where to put the app's Maximum Flow Temperature SLIDER.
+  # Slider values, not flow temps: Tado scales them down by its own weather
+  # curve (~0.8 x slider + 3 at 10C outdoor). Linear between points, flat beyond.
+  curve:
+    - { outdoor_c: 10, slider_c: 64 }
+    - { outdoor_c: 5,  slider_c: 68 }
+    - { outdoor_c: 0,  slider_c: 70 }
+    - { outdoor_c: -3, slider_c: 75 }
+  min_change_c: 2              # don't move the slider for smaller changes
+  override_grace_minutes: 720  # respect a manual slider change in the app this long
