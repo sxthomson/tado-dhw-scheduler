@@ -43,9 +43,8 @@ flow_temperature:
   # Slider values, not flow temps: Tado scales them down by its own weather
   # curve (~0.8 x slider + 3 at 10C outdoor). Linear between points, flat beyond.
   curve:
-    - { outdoor_c: 10, slider_c: 64 }
-    - { outdoor_c: 5,  slider_c: 68 }
-    - { outdoor_c: 0,  slider_c: 70 }
-    - { outdoor_c: -3, slider_c: 75 }
+    - { outdoor_c: 8, slider_c: 65 }   # mild (8C and warmer): the normal value
+    - { outdoor_c: 3, slider_c: 67 }
+    - { outdoor_c: 0, slider_c: 70 }   # freezing and below: the max
   min_change_c: 2              # don't move the slider for smaller changes
   override_grace_minutes: 720  # respect a manual slider change in the app this long
