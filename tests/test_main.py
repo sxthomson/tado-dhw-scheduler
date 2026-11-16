@@ -49,6 +49,9 @@ class FakeClient(FakeFlowClient):
     """Fake covering both the DHW and the flow/telemetry endpoints."""
 
     def __init__(self, dhw_setpoint=50, **kw):
+        # main.handler reads the real clock, so the fake weather must be fresh relative
+        # to it; the fixed conftest NOW makes the reconciler skip with "weather-stale".
+        kw.setdefault("now", datetime.now(timezone.utc))
         super().__init__(**kw)
         self.dhw_setpoint = dhw_setpoint
         self.dhw_writes = []
