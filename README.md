@@ -30,7 +30,9 @@ EventBridge Scheduler (rate: 5 min)
         ├─ Get/PutParameter /tado/flow_last_applied (SSM String) ← same, for the flow slider
         ├─ HTTPS → Tado API                                     ← DHW every tick; weather,
         │                                                          flow + rooms every 15 min
+        │                                                          (far less in lean mode)
         └─ CloudWatch Logs  TADO_TELEMETRY_V1 {json}            ← one record per 15 min
+                            TADO_API_USAGE {json}               ← Tado calls per run
 ```
 
 Each invocation is **idempotent**: it computes the schedule event that should
@@ -139,11 +141,29 @@ run `python scripts/flow_report.py --region <region> --days 14` and adjust the
 struggle, lower it where no room needs more than ~70% valve. If Tado's
 auto-adaptation is ever switched off, the reconciler stops touching the slider.
 
+**Lean mode (Tado free tier)** — without Tado's paid subscription the API allows
+about 100 requests a day; normal running uses about 700. Add to `/tado/config`:
+
+```yaml
+preferences:
+  home_id: 123456        # your Tado home id; skips a lookup on every cold start
+lean_mode:
+  enabled: true
+```
+
+DHW still applies each schedule event on time and respects boosts; the flow
+curve runs hourly; room telemetry stops. About 75 calls a day. Optional tuning:
+`dhw_check_minutes` and `flow_check_minutes` (default 60) and `flow_reserve`
+(default 25: stop the flow curve, never DHW, when Tado reports fewer requests
+left). Check real usage in the `TADO_API_USAGE` log lines before relying on it.
+
 **Re-authenticate** — if the refresh token is ever revoked, re-run
 `scripts/bootstrap_auth.py`.
 
 **Logs** — CloudWatch Logs group `/aws/lambda/tado-dhw-scheduler`. Each run logs
-whether it was a no-op or applied a change.
+whether it was a no-op or applied a change, plus a `TADO_API_USAGE` line counting
+its Tado calls. Calls per day, in Logs Insights:
+`filter @message like /TADO_API_USAGE/ | parse @message '"calls":*,' as calls | stats sum(calls) by bin(1d)`.
 
 **Run cadence / timezone** — override the `ScheduleExpression` and
 `ScheduleTimezone` stack parameters in `template.yaml` (defaults: `rate(5 minutes)`,

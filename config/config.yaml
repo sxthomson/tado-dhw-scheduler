@@ -5,6 +5,10 @@ preferences:
   # schedule reasserts control. Tune freely -- no redeploy needed.
   override_grace_minutes: 60
 
+  # Optional: your Tado home id. Skips the /me lookup on every Lambda cold start
+  # (~11 API calls/day). Live /tado/config only -- never commit the real id.
+  # home_id: 123456
+
 schedule:
   # --- DAILY Shower Ready ---
 
@@ -49,3 +53,13 @@ flow_temperature:
     - { outdoor_c: -3, slider_c: 75 }
   min_change_c: 2              # don't move the slider for smaller changes
   override_grace_minutes: 720  # respect a manual slider change in the app this long
+
+# --- Optional: lean mode (Tado free tier, ~100 API requests/day) -------------
+# Live /tado/config only, like the blocks above. Keeps DHW, then the flow
+# curve; drops room telemetry. Most ticks make no Tado calls (~75/day; check
+# the TADO_API_USAGE log lines). Set preferences.home_id too.
+# lean_mode:
+#   enabled: true
+#   dhw_check_minutes: 60    # DHW safety re-check between schedule events
+#   flow_check_minutes: 60   # how often the flow curve runs
+#   flow_reserve: 25         # stop flow (never DHW) below this many requests left today
