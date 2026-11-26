@@ -98,6 +98,20 @@ def outdoor_from_weather(weather, now):
     return float(celsius)
 
 
+def can_skip_read(cfg, outdoor_c, state):
+    """Lean mode: True when the curve hasn't moved far enough from our last write to need the live slider.
+
+    Skipping the flow-settings GET saves one Tado call per slot. The cost: a manual slider
+    move in the app is only noticed when the curve next wants a change, and is then
+    respected for the full grace window from that point. Never skips while an override is
+    being tracked (its grace clock needs the live value) or without a remembered write.
+    """
+    last = state.get("last_applied_temp")
+    if last is None or outdoor_c is None or state.get("override_since") is not None:
+        return False
+    return abs(interpolate(cfg.curve, outdoor_c) - last) < cfg.min_change_c
+
+
 def decide(current, target, state, now, cfg):
     """Pure decision step, mirroring the DHW override logic in main.reconcile().
 

@@ -1,4 +1,7 @@
+import re
 import logging
+from collections import Counter
+
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -6,6 +9,25 @@ logger = logging.getLogger(__name__)
 
 # (connect, read) seconds. Without this a hung call could eat the whole Lambda timeout.
 DEFAULT_TIMEOUT = (5, 10)
+
+# `RateLimit: "perday";r=19950;t=3600` (IETF draft style). Only `RateLimit-Policy:
+# "perday";q=20000` has been seen on this account so far, so parse leniently.
+_REMAINING_RE = re.compile(r"(?:^|[;,\s])r=(\d+)")
+
+
+def parse_rate_limit_remaining(ratelimit=None, legacy_remaining=None):
+    """Requests left in Tado's quota window, from the response headers, or None if not reported."""
+    if ratelimit:
+        m = _REMAINING_RE.search(ratelimit)
+        if m:
+            return int(m.group(1))
+    if legacy_remaining is not None:
+        try:
+            return int(str(legacy_remaining).strip())
+        except ValueError:
+            pass
+    return None
+
 
 class TadoClient:
     API_BASE = "https://hops.tado.com"
@@ -21,6 +43,47 @@ class TadoClient:
         # limits above, and None until read -- set_max_flow_temperature refuses to guess.
         self.flow_min = None
         self.flow_max = None
+        # Per-invocation API accounting (the client is cached across warm invocations,
+        # so the handler calls reset_usage() at the start of each one).
+        self.usage = Counter()
+        self.rate_limit_remaining = None
+        self.rate_limit_policy = None
+
+    def reset_usage(self):
+        self.usage = Counter()
+        self.rate_limit_remaining = None
+        self.rate_limit_policy = None
+        self.auth.refreshes = 0
+
+    def usage_summary(self):
+        """Calls made since reset_usage(), for the TADO_API_USAGE log line."""
+        return {
+            "calls": sum(self.usage.values()),
+            "endpoints": dict(self.usage),
+            "auth_refreshes": self.auth.refreshes,
+            "remaining": self.rate_limit_remaining,
+            "policy": self.rate_limit_policy,
+        }
+
+    def ensure_home_id(self, configured=None):
+        """Use `preferences.home_id` from the config if set (no API call), else discover once and cache."""
+        if configured is not None:
+            home_id = str(configured).strip()
+            if home_id.isdigit():
+                self.home_id = int(home_id)
+                return self.home_id
+            logger.warning("Ignoring preferences.home_id=%r (not a number); discovering it instead.", configured)
+        if self.home_id is None:
+            self.discover_context()
+        return self.home_id
+
+    def _note_rate_limit(self, headers):
+        policy = headers.get("RateLimit-Policy")
+        if policy:
+            self.rate_limit_policy = policy
+        remaining = parse_rate_limit_remaining(headers.get("RateLimit"), headers.get("RateLimit-Remaining"))
+        if remaining is not None:
+            self.rate_limit_remaining = remaining
 
     def _get_headers(self):
         return {
@@ -28,14 +91,21 @@ class TadoClient:
             "Content-Type": "application/json"
         }
 
-    def _handle_request(self, method, url, **kwargs):
+    def _handle_request(self, method, url, *, endpoint, **kwargs):
         kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+        headers = self._get_headers()  # may refresh the token (login.tado.com, counted separately)
+        self.usage[endpoint] += 1      # count attempts: a request that errors may still have been metered
         try:
-            resp = requests.request(method, url, headers=self._get_headers(), **kwargs)
+            resp = requests.request(method, url, headers=headers, **kwargs)
+            self._note_rate_limit(resp.headers)
             resp.raise_for_status()
             return resp
         except requests.exceptions.HTTPError as e:
-            logger.error(f"⚠️ API ERROR ({resp.status_code}) on {method} {url}")
+            if resp.status_code == 429:
+                logger.error("⚠️ Tado API rate limited (429) on %s %s (remaining=%s, policy=%s).",
+                             method, url, self.rate_limit_remaining, self.rate_limit_policy)
+            else:
+                logger.error(f"⚠️ API ERROR ({resp.status_code}) on {method} {url}")
             try:
                 logger.error(f"⚠️ Tado Message: {resp.json()}")
             except:
@@ -49,13 +119,13 @@ class TadoClient:
     )
     def discover_context(self):
         logger.info("🔍 Discovering Home ID...")
-        resp = self._handle_request("GET", self.ME_URL)
+        resp = self._handle_request("GET", self.ME_URL, endpoint="me")
         self.home_id = resp.json()['homes'][0]['id']
         logger.info(f"✅ Context Discovered: HomeID={self.home_id}")
 
     def get_dhw_state(self):
         url = f"{self.API_BASE}/homes/{self.home_id}/programmer/domesticHotWater/state"
-        resp = self._handle_request("GET", url)
+        resp = self._handle_request("GET", url, endpoint="dhw_state")
         data = resp.json()
         if 'setpointConstraints' in data:
             self.min_temp = data['setpointConstraints'].get('min', 30)
@@ -76,7 +146,7 @@ class TadoClient:
         payload = {"setpoint": safe_temp}
         
         logger.info(f"🔥 Setting DHW to {safe_temp}°C")
-        self._handle_request("POST", url, json=payload)
+        self._handle_request("POST", url, endpoint="dhw_set", json=payload)
         return safe_temp
 
     def get_flow_temperature_optimization(self):
@@ -87,7 +157,7 @@ class TadoClient:
         applies; it reads null for ~15-30s after the slider changes while Tado recomputes.
         """
         url = f"{self.API_BASE}/homes/{self.home_id}/settings/flowTemperatureOptimization"
-        data = self._handle_request("GET", url).json()
+        data = self._handle_request("GET", url, endpoint="flow").json()
         constraints = data.get("maxFlowTemperatureConstraints") or {}
         if "min" in constraints and "max" in constraints:
             self.flow_min = constraints["min"]
@@ -108,18 +178,18 @@ class TadoClient:
 
         url = f"{self.API_BASE}/homes/{self.home_id}/settings/flowTemperatureOptimization"
         logger.info(f"🔥 Setting max flow temperature to {safe_temp}°C")
-        self._handle_request("PATCH", url, json={"maxFlowTemperature": safe_temp})
+        self._handle_request("PATCH", url, endpoint="flow_set", json={"maxFlowTemperature": safe_temp})
         return safe_temp
 
     def get_weather(self):
         """Tado's current outdoor weather for the home (my.tado.com; hops has no weather endpoint)."""
         url = f"{self.MY_API}/homes/{self.home_id}/weather"
-        return self._handle_request("GET", url).json()
+        return self._handle_request("GET", url, endpoint="weather").json()
 
     def get_rooms(self):
         url = f"{self.API_BASE}/homes/{self.home_id}/rooms"
-        return self._handle_request("GET", url).json()
+        return self._handle_request("GET", url, endpoint="rooms").json()
 
     def get_rooms_and_devices(self):
         url = f"{self.API_BASE}/homes/{self.home_id}/roomsAndDevices"
-        return self._handle_request("GET", url).json()
+        return self._handle_request("GET", url, endpoint="rooms_and_devices").json()

@@ -25,6 +25,9 @@ class TadoAuthenticator:
     def __init__(self, token_param_name=None, ssm_client=None):
         self.token_param_name = token_param_name or os.environ.get("TOKEN_PARAM_NAME", "/tado/token")
         self.ssm = ssm_client or boto3.client("ssm")
+        # Refreshes since TadoClient.reset_usage(); logged in TADO_API_USAGE so we can tell
+        # whether login.tado.com calls count against Tado's API quota.
+        self.refreshes = 0
 
     # --- storage backed by SSM SecureString ------------------------------
     def load_tokens(self):
@@ -90,6 +93,7 @@ class TadoAuthenticator:
                 "Re-run scripts/bootstrap_auth.py."
             )
 
+        self.refreshes += 1
         new_tokens = self.refresh_access_token(refresh_token)
         if not new_tokens:
             raise RuntimeError(

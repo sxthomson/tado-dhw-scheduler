@@ -1,4 +1,5 @@
 import sys
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,7 +37,8 @@ class FakeFlowClient:
     """Fake TadoClient for the flow/telemetry side, shaped like the probed hops/my.tado payloads."""
 
     def __init__(self, slider=70, auto=True, effective=59, outdoor_c=9.8, weather_age_min=10,
-                 now=NOW, events=None, ignore_writes=False, disable_auto_on_write=False):
+                 now=NOW, events=None, ignore_writes=False, disable_auto_on_write=False,
+                 quota_remaining=None):
         self.slider = slider
         self.auto = auto
         self.effective = effective
@@ -49,12 +51,45 @@ class FakeFlowClient:
         self.flow_min = None
         self.flow_max = None
         self.fail = set()  # names of fetches that should raise
+        # API accounting, mirroring TadoClient: every Tado call is appended to `calls`
+        # (so tests can assert "no API calls"), and `quota_remaining` simulates the
+        # RateLimit header (decremented per call; None = header absent).
+        self.calls = []
+        self.home_id = None
+        self.quota_remaining = quota_remaining
+        self.rate_limit_remaining = None
+        self._calls_at_reset = 0
+
+    def _call(self, name):
+        self.calls.append(name)
+        if self.quota_remaining is not None:
+            self.quota_remaining -= 1
+            self.rate_limit_remaining = self.quota_remaining
 
     def _maybe_fail(self, name):
         if name in self.fail:
             raise RuntimeError(f"{name} boom")
 
+    def reset_usage(self):
+        self._calls_at_reset = len(self.calls)
+        self.rate_limit_remaining = None
+
+    def usage_summary(self):
+        made = self.calls[self._calls_at_reset:]
+        return {"calls": len(made), "endpoints": dict(Counter(made)), "auth_refreshes": 0,
+                "remaining": self.rate_limit_remaining, "policy": None}
+
+    def ensure_home_id(self, configured=None):
+        if configured is not None:
+            self.home_id = int(configured)
+        elif self.home_id is None:
+            self._call("me")
+            self._maybe_fail("me")
+            self.home_id = 1
+        return self.home_id
+
     def get_flow_temperature_optimization(self):
+        self._call("flow")
         self._maybe_fail("flow")
         self.events.append(("get_flow", self.slider))
         self.flow_min, self.flow_max = 20, 82
@@ -65,6 +100,7 @@ class FakeFlowClient:
         }
 
     def set_max_flow_temperature(self, value):
+        self._call("flow_set")
         self.events.append(("patch", value))
         self.writes.append(value)
         if not self.ignore_writes:
@@ -75,6 +111,7 @@ class FakeFlowClient:
         return value
 
     def get_weather(self):
+        self._call("weather")
         self._maybe_fail("weather")
         return {
             "outsideTemperature": {"celsius": self.outdoor_c, "timestamp": self.weather_at.isoformat().replace("+00:00", "Z")},
@@ -82,10 +119,12 @@ class FakeFlowClient:
         }
 
     def get_rooms(self):
+        self._call("rooms")
         self._maybe_fail("rooms")
         return [ROOM_LIVING, ROOM_OFFICE]
 
     def get_rooms_and_devices(self):
+        self._call("rooms_and_devices")
         self._maybe_fail("rooms_and_devices")
         return ROOMS_AND_DEVICES
 

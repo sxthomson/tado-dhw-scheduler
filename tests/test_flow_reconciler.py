@@ -4,7 +4,7 @@ import pytest
 
 from conftest import CURVE_RAW, NOW, FakeFlowClient, FakeTracker
 from flow_reconciler import (
-    FlowConfig, decide, interpolate, outdoor_from_weather, parse_flow_config, reconcile_flow,
+    FlowConfig, can_skip_read, decide, interpolate, outdoor_from_weather, parse_flow_config, reconcile_flow,
 )
 
 CFG = parse_flow_config(CURVE_RAW)
@@ -233,3 +233,16 @@ def test_reconcile_clamps_target_to_constraints(no_sleep):
     result = _run(client, FakeTracker(state={"last_applied_temp": 70}), cfg)
     assert result["target"] == 82
     assert client.writes == [82]
+
+
+# --- lean mode: can_skip_read ---------------------------------------------------
+
+def test_can_skip_read_only_when_curve_is_within_deadband_of_our_last_write():
+    # CFG puts 9.8C at slider 64; the deadband is 2.
+    assert can_skip_read(CFG, 9.8, {"last_applied_temp": 64}) is True
+    assert can_skip_read(CFG, 9.8, {"last_applied_temp": 63}) is True
+    assert can_skip_read(CFG, 9.8, {"last_applied_temp": 62}) is False   # deadband reached: read, then maybe write
+    assert can_skip_read(CFG, 9.8, {}) is False                          # no memory: must read
+    assert can_skip_read(CFG, None, {"last_applied_temp": 64}) is False  # no outdoor reading
+    tracked_override = {"last_applied_temp": 64, "override_since": "2026-10-19T20:00:00+00:00", "override_temp": 60}
+    assert can_skip_read(CFG, 9.8, tracked_override) is False            # grace clock needs the live value
