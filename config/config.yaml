@@ -25,12 +25,12 @@ schedule:
   # --- DAILY (Evening Top-up) ---
   - name: "Daily: Evening Top-up ON"
     days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
-    time: "16:00"
+    time: "15:30"
     temperature: 50
 
   - name: "Daily: Evening Top-up OFF"
     days: ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
-    time: "16:30"
+    time: "16:00"
     temperature: 30
 
 # --- Optional: weather-driven max flow temperature + room telemetry ----------
@@ -42,18 +42,20 @@ telemetry:
 
 flow_temperature:
   enabled: true
-  dry_run: true            # log what it would set without writing; flip once happy
+  dry_run: false           # true = log what it would set without writing
   # Outdoor temp (C) -> where to put the app's Maximum Flow Temperature SLIDER.
   # Slider values, not flow temps: Tado scales them down by its own weather
   # curve (measured Oct-Nov 2026: effective ~ slider - 10 when mild, ~ slider - 7
   # near 0C). Linear between points, flat beyond.
   curve:
-    - { outdoor_c: 12, slider_c: 60 }  # mild (12C and warmer): ~50 effective
-    - { outdoor_c: 8,  slider_c: 63 }
+    - { outdoor_c: 10, slider_c: 60 }  # mild (10C and warmer): ~50 effective
+    - { outdoor_c: 8,  slider_c: 62 }
+    - { outdoor_c: 5,  slider_c: 65 }
     - { outdoor_c: 3,  slider_c: 67 }
-    - { outdoor_c: 0,  slider_c: 70 }  # freezing and below: the max, ~63 effective
+    - { outdoor_c: 0,  slider_c: 70 }
+    - { outdoor_c: -2, slider_c: 72 }  # -2C and below: the max, ~65 effective
   min_change_c: 2              # don't move the slider for smaller changes
-  override_grace_minutes: 720  # respect a manual slider change in the app this long
+  override_grace_minutes: 180  # respect a manual slider change in the app this long
 
 # --- Optional: lean mode (Tado free tier, ~100 API requests/day) -------------
 # Live /tado/config only, like the blocks above. Keeps DHW, then the flow
