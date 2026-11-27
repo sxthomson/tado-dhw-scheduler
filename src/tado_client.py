@@ -72,7 +72,7 @@ class TadoClient:
             if home_id.isdigit():
                 self.home_id = int(home_id)
                 return self.home_id
-            logger.warning("Ignoring preferences.home_id=%r (not a number); discovering it instead.", configured)
+            logger.warning("Config: ignoring preferences.home_id=%r (not a number); discovering it instead.", configured)
         if self.home_id is None:
             self.discover_context()
         return self.home_id
@@ -101,27 +101,27 @@ class TadoClient:
             resp.raise_for_status()
             return resp
         except requests.exceptions.HTTPError as e:
-            if resp.status_code == 429:
-                logger.error("⚠️ Tado API rate limited (429) on %s %s (remaining=%s, policy=%s).",
-                             method, url, self.rate_limit_remaining, self.rate_limit_policy)
-            else:
-                logger.error(f"⚠️ API ERROR ({resp.status_code}) on {method} {url}")
             try:
-                logger.error(f"⚠️ Tado Message: {resp.json()}")
-            except:
-                logger.error(f"⚠️ Raw Response: {resp.text}")
+                body = resp.json()
+            except ValueError:
+                body = resp.text
+            if resp.status_code == 429:
+                logger.error("Tado API: rate limited (429) on %s %s (remaining=%s, policy=%s). Response: %s",
+                             method, url, self.rate_limit_remaining, self.rate_limit_policy, body)
+            else:
+                logger.error("Tado API: HTTP %s on %s %s. Response: %s", resp.status_code, method, url, body)
             raise e
-            
+
     @retry(
         stop=stop_after_attempt(5), 
         wait=wait_exponential(multiplier=1, min=2, max=15),
         retry=retry_if_exception_type((requests.exceptions.ConnectionError, requests.exceptions.Timeout))
     )
     def discover_context(self):
-        logger.info("🔍 Discovering Home ID...")
+        logger.info("Tado API: discovering home id.")
         resp = self._handle_request("GET", self.ME_URL, endpoint="me")
         self.home_id = resp.json()['homes'][0]['id']
-        logger.info(f"✅ Context Discovered: HomeID={self.home_id}")
+        logger.info("Tado API: discovered home id %s.", self.home_id)
 
     def get_dhw_state(self):
         url = f"{self.API_BASE}/homes/{self.home_id}/programmer/domesticHotWater/state"
@@ -140,12 +140,11 @@ class TadoClient:
     def set_dhw_temperature(self, target_temp):
         safe_temp = max(self.min_temp, min(target_temp, self.max_temp))
         if safe_temp != target_temp:
-            logger.warning(f"⚠️ Target {target_temp}°C clamped to {safe_temp}°C")
+            logger.warning("DHW: target %s°C clamped to %s°C (Tado limits %s–%s°C).", target_temp, safe_temp, self.min_temp, self.max_temp)
             
         url = f"{self.API_BASE}/homes/{self.home_id}/programmer/domesticHotWater/manualControl?ngsw-bypass=true"
         payload = {"setpoint": safe_temp}
         
-        logger.info(f"🔥 Setting DHW to {safe_temp}°C")
         self._handle_request("POST", url, endpoint="dhw_set", json=payload)
         return safe_temp
 
@@ -174,10 +173,9 @@ class TadoClient:
             raise RuntimeError("Flow temperature constraints unknown; call get_flow_temperature_optimization() first.")
         safe_temp = int(max(self.flow_min, min(target_temp, self.flow_max)))
         if safe_temp != target_temp:
-            logger.warning(f"⚠️ Max flow target {target_temp}°C clamped to {safe_temp}°C")
+            logger.warning("Flow: slider target %s°C clamped to %s°C (Tado limits %s–%s°C).", target_temp, safe_temp, self.flow_min, self.flow_max)
 
         url = f"{self.API_BASE}/homes/{self.home_id}/settings/flowTemperatureOptimization"
-        logger.info(f"🔥 Setting max flow temperature to {safe_temp}°C")
         self._handle_request("PATCH", url, endpoint="flow_set", json={"maxFlowTemperature": safe_temp})
         return safe_temp
 

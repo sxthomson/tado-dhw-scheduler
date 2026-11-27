@@ -97,7 +97,7 @@ def test_rate_limit_is_logged_clearly_and_raises(http, caplog):
                                    headers={"RateLimit": '"perday";r=0;t=3600'})]
     with pytest.raises(requests.exceptions.HTTPError):
         c.get_dhw_state()
-    assert "rate limited (429)" in caplog.text and "API ERROR" not in caplog.text
+    assert "rate limited (429)" in caplog.text and "HTTP 429" not in caplog.text
     assert c.usage_summary()["calls"] == 1 and c.rate_limit_remaining == 0
 
 
