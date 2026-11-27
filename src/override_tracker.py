@@ -39,7 +39,7 @@ class OverrideTracker:
         except self.ssm.exceptions.ParameterNotFound:
             return {}
         except (json.JSONDecodeError, KeyError):
-            logger.warning("Override-tracker parameter %s present but unreadable/corrupt. Treating as empty.", self.param_name)
+            logger.warning("Tracker: parameter %s present but unreadable/corrupt; treating as empty.", self.param_name)
             return {}
 
     def save(self, state):

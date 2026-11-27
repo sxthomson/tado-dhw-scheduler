@@ -21,7 +21,7 @@ def room(t, sp=20.0, pw=100, rid=1, name="Cold Room", dev=("VA04",), **flags):
 def test_parse_message_extracts_record_from_lambda_log_line():
     line = '[INFO]\t2026-12-01T06:00:00.000Z\treq-id\tTADO_TELEMETRY_V1 {"v":1,"slider":70}\n'
     assert flow_report.parse_message(line) == {"v": 1, "slider": 70}
-    assert flow_report.parse_message("Reconcile result: {}") is None
+    assert flow_report.parse_message("Handler: result {}") is None
 
 
 def test_band():

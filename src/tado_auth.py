@@ -37,7 +37,7 @@ class TadoAuthenticator:
         except self.ssm.exceptions.ParameterNotFound:
             return None
         except (json.JSONDecodeError, KeyError):
-            logger.warning("Token parameter %s present but unreadable/corrupt.", self.token_param_name)
+            logger.warning("Auth: token parameter %s present but unreadable/corrupt.", self.token_param_name)
             return None
 
     def save_tokens(self, tokens):
@@ -50,7 +50,7 @@ class TadoAuthenticator:
             Type="SecureString",
             Overwrite=True,
         )
-        logger.info("Tokens persisted to SSM parameter %s", self.token_param_name)
+        logger.info("Auth: tokens saved to SSM parameter %s.", self.token_param_name)
 
     # --- refresh ----------------------------------------------------------
     def refresh_access_token(self, refresh_token):
@@ -61,7 +61,7 @@ class TadoAuthenticator:
         }
         resp = requests.post(f"{AUTH_SERVER}/oauth2/token", data=payload, timeout=10)
         if resp.status_code != 200:
-            logger.error("Token refresh failed: %s - %s", resp.status_code, resp.text)
+            logger.error("Auth: token refresh failed (HTTP %s). Response: %s", resp.status_code, resp.text)
             return None
 
         tokens = resp.json()
@@ -85,7 +85,7 @@ class TadoAuthenticator:
         if time.time() < (tokens.get("expires_at", 0) - 60):
             return tokens["access_token"]
 
-        logger.info("Access token expired; refreshing.")
+        logger.info("Auth: access token expired; refreshing.")
         refresh_token = tokens.get("refresh_token")
         if not refresh_token:
             raise RuntimeError(

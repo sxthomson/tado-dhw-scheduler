@@ -43,5 +43,5 @@ class ConfigManager:
             new_map[day].sort(key=lambda x: x["time"])  # ordering is load-bearing for get_ruling_event
 
         self.schedule_map = new_map
-        logger.info("Configuration loaded from %s and indexed.", self.config_param_name)
+        logger.info("Config: loaded from %s.", self.config_param_name)
         return self.config

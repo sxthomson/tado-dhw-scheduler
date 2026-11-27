@@ -21,7 +21,7 @@ class FlowConfig:
 
     `curve` maps outdoor temperature to the app's Maximum Flow Temperature *slider*
     value -- not the flow temperature the boiler ends up at. Tado scales the slider
-    down by its own weather curve (probed 2026-10-19 at 9.8C outdoor: effective cap =
+    down by its own weather curve (probed 2026-10-19 at 9.8°C outdoor: effective cap =
     0.8 * slider + 3), so these numbers are deliberately higher than the target flow.
     """
     dry_run: bool
@@ -190,18 +190,18 @@ def reconcile_flow(client, tracker, cfg, flow, weather, now):
         result["override_since"] = (decision.new_state or state).get("override_since")
 
     if cfg.dry_run:
-        logger.info("Flow [dry run]: outdoor %.1fC -> slider target %s (live %s): would %s (%s).",
+        logger.info("Flow [dry run]: outdoor %.1f°C -> slider target %s°C (current %s°C). Would %s (%s).",
                     outdoor_c, target, current, decision.action, decision.reason)
         return result
 
     if decision.action == "noop":
         if decision.new_state is not None:
             tracker.save(decision.new_state)
-        logger.info("Flow: outdoor %.1fC -> slider target %s (live %s). No change (%s).",
+        logger.info("Flow: outdoor %.1f°C -> slider target %s°C (current %s°C). No change (%s).",
                     outdoor_c, target, current, decision.reason)
         return result
 
-    logger.info("Flow: outdoor %.1fC -> setting slider %s -> %s (%s).", outdoor_c, current, target, decision.reason)
+    logger.info("Flow: outdoor %.1f°C -> setting slider %s°C -> %s°C (%s).", outdoor_c, current, target, decision.reason)
     client.set_max_flow_temperature(target)
     # Record the write before verifying, so a timeout below can't make our own write
     # look like a manual override next run.
@@ -212,9 +212,10 @@ def reconcile_flow(client, tracker, cfg, flow, weather, now):
     verify = after.get("maxFlowTemperature")
     if verify != target:
         tracker.save(state)  # the write didn't take; don't claim it as ours
-        raise RuntimeError(f"Flow verification failed: wanted slider {target}, got {verify}")
+        got = "no slider value" if verify is None else f"{verify}°C"
+        raise RuntimeError(f"Flow verification failed: wanted slider {target}°C, got {got}")
     if not (after.get("autoAdaptation") or {}).get("enabled"):
         raise RuntimeError("Tado auto-adaptation is OFF after our max flow write.")
 
-    logger.info("Flow: slider set to %s successfully.", target)
+    logger.info("Flow: slider set to %s°C successfully.", target)
     return result

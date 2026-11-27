@@ -11,7 +11,9 @@ from tado_auth import TadoAuthenticator
 from tado_client import TadoClient
 from config_manager import ConfigManager
 from override_tracker import OverrideTracker
-from flow_reconciler import can_skip_read, interpolate, outdoor_from_weather, parse_flow_config, reconcile_flow
+from flow_reconciler import (
+    MAX_WEATHER_AGE_MINUTES, can_skip_read, interpolate, outdoor_from_weather, parse_flow_config, reconcile_flow,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -61,7 +63,7 @@ def _slot_minutes(raw, key):
     except (TypeError, ValueError):
         minutes = None
     if minutes is None or minutes <= 0 or minutes % 5 or 1440 % minutes:
-        logger.warning("lean_mode.%s=%r must be a multiple of 5 that divides 1440; using %s.", key, value, default)
+        logger.warning("Config: lean_mode.%s=%r must be a multiple of 5 that divides 1440; using %s.", key, value, default)
         return default
     return minutes
 
@@ -78,7 +80,7 @@ def parse_lean_config(raw):
         raw = {"enabled": True}
     if not isinstance(raw, dict) or raw.get("enabled") is not True:
         # Silently staying off would mean ~700 Tado calls/day -- far over the free tier.
-        logger.warning("lean_mode=%r is not `true` or `{enabled: true}`; lean mode is OFF.", raw)
+        logger.warning("Config: lean_mode=%r is not `true` or `{enabled: true}`; lean mode is OFF.", raw)
         return None
     reserve = raw.get("flow_reserve", _LEAN_DEFAULTS.flow_reserve)
     try:
@@ -86,7 +88,7 @@ def parse_lean_config(raw):
         if reserve < 0:
             raise ValueError
     except (TypeError, ValueError):
-        logger.warning("lean_mode.flow_reserve=%r must be a whole number >= 0; using %s.",
+        logger.warning("Config: lean_mode.flow_reserve=%r must be a whole number >= 0; using %s.",
                        raw.get("flow_reserve"), _LEAN_DEFAULTS.flow_reserve)
         reserve = _LEAN_DEFAULTS.flow_reserve
     return LeanConfig(
@@ -178,7 +180,7 @@ def reconcile(client, config_mgr, tracker):
 
     target_dt, target_temp = get_ruling_event(config_mgr.schedule_map, now)
     if target_dt is None:
-        logger.info("No active schedule event found. Nothing to do.")
+        logger.info("DHW: no active schedule event. No change.")
         return {"status": "no-op", "reason": "no ruling event"}
 
     state = client.get_dhw_state()
@@ -192,26 +194,27 @@ def reconcile(client, config_mgr, tracker):
     override_temp = tracked.get("override_temp")
 
     def apply(temp, reason):
-        logger.info("Applying %s C (%s). Previous: %s C.", temp, reason, current)
+        logger.info("DHW: setting %s°C -> %s°C (%s).", current, temp, reason)
         client.set_dhw_temperature(temp)
 
         # Verify the change actually landed.
         time.sleep(2)
         verify = client.get_dhw_state().get("setpoint")
         if verify is None or abs(verify - temp) > TOLERANCE_C:
-            raise RuntimeError(f"Verification failed: wanted {temp}, got {verify}")
+            got = "no setpoint" if verify is None else f"{verify}°C"
+            raise RuntimeError(f"DHW verification failed: wanted {temp}°C, got {got}")
 
         # A fresh apply always starts a clean slate -- any override being
         # tracked is, by definition, over now that we've taken control back.
         tracker.save({"last_applied_temp": temp, "last_applied_at": now.isoformat()})
-        logger.info("Applied %s C successfully.", temp)
+        logger.info("DHW: set to %s°C successfully.", temp)
         return {"status": "applied", "target": temp, "previous": current, "reason": reason}
 
     # 1. Already at the scheduled target -- in sync, nothing to do.
     if abs(current - target_temp) <= TOLERANCE_C:
         if override_since is not None or last_applied_temp is None or abs(last_applied_temp - current) > TOLERANCE_C:
             tracker.save({"last_applied_temp": current, "last_applied_at": now.isoformat()})
-        logger.info("Already at target %s C (current %s C). No change.", target_temp, current)
+        logger.info("DHW: target %s°C (current %s°C). No change.", target_temp, current)
         return {"status": "no-op", "target": target_temp, "current": current}
 
     # 2. First run ever (or tracker param wiped) -- no memory of what we last
@@ -235,7 +238,7 @@ def reconcile(client, config_mgr, tracker):
 
     if not is_continuing_override:
         logger.info(
-            "Manual override detected: %s C (target is %s C). Respecting it for up to %s min.",
+            "DHW: manual override detected at %s°C (target %s°C). Respecting it for up to %s min.",
             current, target_temp, grace_minutes,
         )
         tracker.save({
@@ -249,7 +252,7 @@ def reconcile(client, config_mgr, tracker):
     elapsed_min = (now - datetime.fromisoformat(override_since)).total_seconds() / 60
     if elapsed_min < grace_minutes:
         logger.info(
-            "Override still within grace window (%.0f/%s min). Leaving %s C alone.",
+            "DHW: override still within grace window (%.0f/%s min). Leaving %s°C alone.",
             elapsed_min, grace_minutes, current,
         )
         return {
@@ -257,7 +260,7 @@ def reconcile(client, config_mgr, tracker):
             "current": current, "target": target_temp, "elapsed_min": round(elapsed_min, 1),
         }
 
-    logger.info("Override grace window elapsed (%.0f min). Resuming schedule control.", elapsed_min)
+    logger.info("DHW: override grace window elapsed (%.0f min). Resuming schedule control.", elapsed_min)
     return apply(target_temp, "override-expired")
 
 
@@ -272,7 +275,7 @@ def slow_tick_time(event):
         try:
             return datetime.fromisoformat(scheduled.replace("Z", "+00:00"))
         except ValueError:
-            logger.warning("Unparseable scheduled_time %r; falling back to the wall clock.", scheduled)
+            logger.warning("Handler: unparseable scheduled_time %r; falling back to the wall clock.", scheduled)
     return datetime.now(timezone.utc)
 
 
@@ -417,13 +420,13 @@ def _lean_flow_shortcut(client, flow_tracker, flow_cfg, weather, now, lean):
         return skip
     outdoor_c = outdoor_from_weather(weather, now)
     if outdoor_c is None:
-        logger.warning("Flow [lean]: outdoor temperature missing or stale; skipping.")
+        logger.warning("Flow [lean]: outdoor temperature missing or older than %s min; skipping.", MAX_WEATHER_AGE_MINUTES)
         return {"dry_run": flow_cfg.dry_run, "action": "skip", "reason": "weather-stale"}
     state = flow_tracker.load()
     if not can_skip_read(flow_cfg, outdoor_c, state):
         return None
     target = interpolate(flow_cfg.curve, outdoor_c)
-    logger.info("Flow [lean]: outdoor %.1fC -> slider target %s (last set %s). No change; settings read skipped.",
+    logger.info("Flow [lean]: outdoor %.1f°C -> slider target %s°C (last set %s°C). No change; settings read skipped.",
                 outdoor_c, target, state.get("last_applied_temp"))
     return {"dry_run": flow_cfg.dry_run, "current": None, "outdoor_c": outdoor_c, "target": target,
             "last_applied": state.get("last_applied_temp"), "action": "noop", "reason": "lean-unchanged"}
@@ -438,7 +441,7 @@ def _slow_loop_calls_tado(config, lean):
 def _ensure_home(client, config, lean):
     configured = (config.get("preferences") or {}).get("home_id")
     if lean is not None and configured is None and client.home_id is None:
-        logger.warning("Lean mode: set preferences.home_id in /tado/config to skip the /me lookup on cold starts.")
+        logger.warning("Config: lean mode is on but preferences.home_id is unset; set it in /tado/config to skip the /me lookup on cold starts.")
     client.ensure_home_id(configured)
 
 
@@ -460,7 +463,7 @@ def handler(event, context):
     In lean mode DHW runs only on ticks dhw_due() picks and the slow loop once per
     `flow_check_minutes`; every other tick makes no Tado calls at all.
     """
-    logger.info("Tado reconcile invocation start.")
+    logger.info("Handler: invocation start.")
     client, config_mgr, tracker, flow_tracker = _bootstrap()
     config_mgr.load_config()
     config = config_mgr.config
@@ -478,7 +481,7 @@ def handler(event, context):
                 due, reason = dhw_due(config_mgr.schedule_map, tick.astimezone(schedule_tz(prefs)), tracker.load(),
                                       prefs.get("override_grace_minutes", 60), lean.dhw_check_minutes)
             except Exception:
-                logger.exception("Lean DHW gate failed; running DHW anyway.")
+                logger.exception("DHW [lean]: due-check failed; running DHW anyway.")
                 due, reason = True, "gate-error"
             if not due:
                 results["dhw"] = {"status": "skipped", "reason": "lean-not-due"}
@@ -489,7 +492,7 @@ def handler(event, context):
             try:
                 _ensure_home(client, config, lean)
             except Exception as e:
-                logger.exception("Tado home id lookup failed; skipping this tick.")
+                logger.exception("Tado API: home id lookup failed; skipping this tick.")
                 failures.append(f"home: {e}")
                 due = slow = False
 
@@ -499,24 +502,24 @@ def handler(event, context):
                 if reason:
                     results["dhw"]["lean_reason"] = reason
             except Exception as e:
-                logger.exception("DHW reconcile failed.")
+                logger.exception("DHW: reconcile failed.")
                 failures.append(f"dhw: {e}")
 
         if slow:
             remaining_ms = context.get_remaining_time_in_millis() if context is not None else None
             if remaining_ms is not None and remaining_ms < MIN_REMAINING_MS_FOR_SLOW_LOOP:
-                logger.warning("Only %s ms left; skipping the slow loop this tick.", remaining_ms)
+                logger.warning("Slow loop: only %s ms left; skipping this tick.", remaining_ms)
                 results["slow"] = {"status": "skipped", "reason": "low remaining time"}
             else:
                 try:
                     results["slow"] = run_slow_loop(client, flow_tracker, config, datetime.now(timezone.utc), lean=lean)
                 except Exception as e:
-                    logger.exception("Flow temperature reconcile failed.")
+                    logger.exception("Slow loop: failed.")
                     failures.append(f"flow: {e}")
     finally:
         _log_usage(client, lean)
 
-    logger.info("Reconcile result: %s", results)
+    logger.info("Handler: result %s", json.dumps(results, separators=(",", ":"), ensure_ascii=False, default=str))
     if failures:
         raise RuntimeError("Reconcile failed: " + "; ".join(failures))
     return results
